@@ -1,0 +1,35 @@
+FROM nvidia/cuda:12.6.1-runtime-ubuntu22.04 AS frontend-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates gnupg && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get update && apt-get install -y --no-install-recommends nodejs
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/src ./src
+RUN npm install && npm run build
+
+FROM nvidia/cuda:12.6.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    SUBPIPELINE_DB_PATH=/config/subpipeline.db \
+    SUBPIPELINE_FRONTEND_DIST=/app/frontend/dist \
+    SUBPIPELINE_PORT=8000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv supervisor ffmpeg curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY backend /app/backend
+COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
+COPY container/supervisord.conf /etc/supervisor/conf.d/subpipeline.conf
+
+RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt \
+    && mkdir -p /data /output /models /config
+
+EXPOSE 8000
+VOLUME ["/data", "/output", "/models", "/config"]
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/subpipeline.conf"]
