@@ -13,7 +13,6 @@ DEFAULT_CONFIG = {
         "in_place": False,
     },
     "processing": {
-        "backend_mode": "mock",
         "max_retries": 1,
         "poll_interval_seconds": 2,
         "work_dir": "/config/work",
@@ -27,12 +26,9 @@ DEFAULT_CONFIG = {
     },
     "translation": {
         "enabled": True,
-        "provider": "mock",
         "target_languages": ["zh-CN"],
         "max_retries": 2,
         "timeout_seconds": 30,
-        "mock_prefix_template": "[{lang}] ",
-        "fail_languages": [],
         "api_base_url": "https://api.openai.com",
         "api_key": "",
         "model": "gpt-4o-mini",
@@ -54,8 +50,6 @@ SYSTEM_LEVEL_FIELDS = {
     ("whisper", "model_name"),
     ("whisper", "device"),
     ("whisper", "align_model"),
-    ("translation", "provider"),
-    ("processing", "backend_mode"),
 }
 
 RESULT_AFFECTING_GROUPS = {"file", "processing", "whisper", "translation", "subtitle"}

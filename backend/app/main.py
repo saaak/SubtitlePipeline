@@ -11,6 +11,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .model_manager import ModelManager
+from .pipeline import PipelineError, get_translation_provider
 from .runtime import ScannerService, WorkerService
 from .store import Database
 
@@ -38,6 +40,19 @@ class ScanResponse(BaseModel):
     skipped: int
 
 
+class TranslationTestRequest(BaseModel):
+    enabled: bool = True
+    api_base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout_seconds: int = 30
+    target_language: str = "zh-CN"
+
+
+class SetupCompleteRequest(BaseModel):
+    setup_complete: bool = True
+
+
 def resolve_db_path() -> str:
     return os.environ.get("SUBPIPELINE_DB_PATH", "/config/subpipeline.db")
 
@@ -46,16 +61,25 @@ def resolve_frontend_dist() -> Path:
     return Path(os.environ.get("SUBPIPELINE_FRONTEND_DIST", Path(__file__).resolve().parents[2] / "frontend" / "dist"))
 
 
+def resolve_models_dir() -> str:
+    return os.environ.get("SUBPIPELINE_MODELS_DIR", "/models")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database = Database(resolve_db_path())
     database.initialize()
     app.state.database = database
+    app.state.model_manager = ModelManager(resolve_models_dir())
     yield
 
 
 def get_database(app: FastAPI) -> Database:
     return app.state.database
+
+
+def get_model_manager(app: FastAPI) -> ModelManager:
+    return app.state.model_manager
 
 
 def create_app() -> FastAPI:
@@ -154,6 +178,100 @@ def create_app() -> FastAPI:
             return database.update_config(payload)
         except KeyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/system/status")
+    def get_system_status() -> dict[str, Any]:
+        database = get_database(app)
+        model_manager = get_model_manager(app)
+        config = database.get_config()
+        system_status = database.get_system_status()
+        return {
+            **system_status,
+            "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
+            "current_model": config["whisper"]["model_name"],
+        }
+
+    @app.post("/api/system/setup-complete")
+    def set_setup_complete(request: SetupCompleteRequest) -> dict[str, Any]:
+        database = get_database(app)
+        updated = database.set_setup_complete(request.setup_complete)
+        config = database.get_config()
+        model_manager = get_model_manager(app)
+        return {
+            **updated,
+            "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
+            "current_model": config["whisper"]["model_name"],
+        }
+
+    @app.post("/api/translation/test")
+    def test_translation(request: TranslationTestRequest) -> dict[str, Any]:
+        if not request.enabled:
+            return {"success": True, "message": "翻译已禁用，跳过连接测试"}
+        try:
+            provider = get_translation_provider(
+                {
+                    "translation": {
+                        "enabled": True,
+                        "api_base_url": request.api_base_url,
+                        "api_key": request.api_key,
+                        "model": request.model,
+                        "timeout_seconds": request.timeout_seconds,
+                    }
+                }
+            )
+            provider.translate_batch(["connection check"], request.target_language)
+        except Exception as exc:
+            return {"success": False, "message": str(exc)}
+        return {"success": True, "message": "翻译服务连接成功"}
+
+    @app.get("/api/models")
+    def list_models() -> dict[str, Any]:
+        database = get_database(app)
+        model_manager = get_model_manager(app)
+        config = database.get_config()
+        return {
+            "items": model_manager.list_models(str(config["whisper"]["model_name"])),
+            "current_model": config["whisper"]["model_name"],
+        }
+
+    @app.post("/api/models/{name}/download", status_code=202)
+    def download_model(name: str) -> dict[str, str]:
+        model_manager = get_model_manager(app)
+        try:
+            model_manager.start_download(name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"message": f"模型 {name} 下载已启动"}
+
+    @app.delete("/api/models/{name}")
+    def delete_model(name: str) -> dict[str, str]:
+        database = get_database(app)
+        model_manager = get_model_manager(app)
+        config = database.get_config()
+        try:
+            model_manager.delete_model(name, str(config["whisper"]["model_name"]))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"message": f"模型 {name} 已删除"}
+
+    @app.post("/api/models/{name}/activate")
+    def activate_model(name: str) -> dict[str, Any]:
+        database = get_database(app)
+        model_manager = get_model_manager(app)
+        if not model_manager.has_model(name):
+            raise HTTPException(status_code=400, detail="模型尚未安装，无法切换")
+        try:
+            updated = database.update_config({"whisper": {"model_name": name}})
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "message": f"当前模型已切换为 {name}",
+            "config": updated,
+        }
 
     @app.post("/api/admin/scans/run", response_model=ScanResponse)
     def run_scan_once() -> ScanResponse:

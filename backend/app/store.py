@@ -11,6 +11,14 @@ from typing import Any, Iterator
 from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config
 
 
+OBSOLETE_CONFIG_FIELDS = {
+    ("processing", "backend_mode"),
+    ("translation", "provider"),
+    ("translation", "mock_prefix_template"),
+    ("translation", "fail_languages"),
+}
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -118,6 +126,13 @@ class Database:
                     source_mtime = COALESCE(source_mtime, 0)
                 """
             )
+            connection.executemany(
+                """
+                DELETE FROM system_config
+                WHERE group_name = ? AND key_name = ?
+                """,
+                list(OBSOLETE_CONFIG_FIELDS),
+            )
             defaults = copy_default_config()
             now = utc_now()
             for group_name, group_values in defaults.items():
@@ -132,6 +147,14 @@ class Database:
                         """,
                         (group_name, key_name, json.dumps(value), scope, restart_required, now),
                     )
+            connection.execute(
+                """
+                INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('system', 'setup_complete', 'false', 'system', 0, ?)
+                ON CONFLICT(group_name, key_name) DO NOTHING
+                """,
+                (now,),
+            )
 
     def _ensure_column(self, connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
         columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -151,8 +174,10 @@ class Database:
             ).fetchall()
         restart_required = False
         for row in rows:
-            defaults.setdefault(row["group_name"], {})[row["key_name"]] = json.loads(row["value_json"])
             restart_required = restart_required or bool(row["restart_required"] and row["scope"] == "system")
+            if row["group_name"] == "system":
+                continue
+            defaults.setdefault(row["group_name"], {})[row["key_name"]] = json.loads(row["value_json"])
         defaults["meta"] = {"restart_required": restart_required}
         return defaults
 
@@ -199,6 +224,44 @@ class Database:
             connection.execute(
                 "UPDATE system_config SET restart_required = 0 WHERE scope = 'system'"
             )
+
+    def get_system_status(self) -> dict[str, Any]:
+        config = self.get_config()
+        translation = config["translation"]
+        translation_ready = True
+        if translation["enabled"]:
+            translation_ready = all(
+                str(translation[key]).strip()
+                for key in ("api_base_url", "api_key", "model")
+            )
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT value_json
+                FROM system_config
+                WHERE group_name = 'system' AND key_name = 'setup_complete'
+                """
+            ).fetchone()
+        setup_complete = bool(json.loads(row["value_json"])) if row else False
+        return {
+            "setup_complete": setup_complete,
+            "translation_ready": translation_ready,
+        }
+
+    def set_setup_complete(self, setup_complete: bool) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('system', 'setup_complete', ?, 'system', 0, ?)
+                ON CONFLICT(group_name, key_name)
+                DO UPDATE SET value_json = excluded.value_json,
+                              updated_at = excluded.updated_at,
+                              restart_required = 0
+                """,
+                (json.dumps(setup_complete), utc_now()),
+            )
+        return self.get_system_status()
 
     def list_tasks(self, page: int, page_size: int, status: str | None = None) -> PageResult:
         offset = max(page - 1, 0) * page_size

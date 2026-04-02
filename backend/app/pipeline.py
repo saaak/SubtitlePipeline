@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -29,23 +30,6 @@ class TaskContext:
 class TranslationProvider:
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
         raise NotImplementedError
-
-
-class MockTranslationProvider(TranslationProvider):
-    def __init__(self, prefix_template: str, fail_languages: list[str]):
-        self.prefix_template = prefix_template
-        self.fail_languages = set(fail_languages)
-
-    def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
-        if target_language in self.fail_languages:
-            raise PipelineError(f"mock translation failed for {target_language}")
-        prefix = self.prefix_template.format(lang=target_language)
-        return [f"{prefix}{text}" for text in texts]
-
-
-class EchoTranslationProvider(TranslationProvider):
-    def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
-        return [f"{text} ({target_language})" for text in texts]
 
 
 class OpenAICompatibleTranslationProvider(TranslationProvider):
@@ -106,13 +90,9 @@ def ensure_parent(path: Path) -> None:
 
 def extract_audio(context: TaskContext) -> Path:
     whisper_config = context.config_snapshot["whisper"]
-    processing_config = context.config_snapshot["processing"]
     source_path = Path(context.file_path)
     audio_path = context.work_dir / f"{source_path.stem}.{whisper_config['audio_format']}"
     ensure_parent(audio_path)
-    if processing_config["backend_mode"] == "mock":
-        audio_path.write_bytes(source_path.name.encode("utf-8"))
-        return audio_path
     ffmpeg_path = shutil.which("ffmpeg")
     if not ffmpeg_path:
         raise PipelineError("ffmpeg 未安装，无法执行真实音频提取")
@@ -135,26 +115,19 @@ def extract_audio(context: TaskContext) -> Path:
 
 
 def run_asr(context: TaskContext, audio_path: Path) -> dict[str, Any]:
-    processing_config = context.config_snapshot["processing"]
-    source_path = Path(context.file_path)
-    if processing_config["backend_mode"] == "mock":
-        stem_text = source_path.stem.replace("_", " ").replace("-", " ").strip() or "sample video"
-        first_text = f"{stem_text} segment one."
-        second_text = f"{stem_text} segment two."
-        return {
-            "segments": [
-                {"start": 0.0, "end": 2.5, "text": first_text},
-                {"start": 2.5, "end": 5.0, "text": second_text},
-            ],
-            "device": context.config_snapshot["whisper"]["device"],
-            "audio_path": str(audio_path),
-        }
     try:
         import whisperx  # type: ignore
     except ImportError as exc:
         raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
     whisper_config = context.config_snapshot["whisper"]
-    model = whisperx.load_model(whisper_config["model_name"], whisper_config["device"])
+    models_root = Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
+    local_model_dir = models_root / str(whisper_config["model_name"])
+    model_reference = str(local_model_dir) if local_model_dir.exists() else whisper_config["model_name"]
+    model = whisperx.load_model(
+        model_reference,
+        whisper_config["device"],
+        download_root=str(models_root),
+    )
     result = model.transcribe(str(audio_path))
     align_model, metadata = whisperx.load_align_model(
         language_code=result.get("language", "en"),
@@ -193,22 +166,12 @@ def process_text_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def get_translation_provider(config_snapshot: dict[str, Any]) -> TranslationProvider:
     translation = config_snapshot["translation"]
-    provider_name = translation["provider"]
-    if provider_name == "mock":
-        return MockTranslationProvider(
-            prefix_template=translation["mock_prefix_template"],
-            fail_languages=list(translation.get("fail_languages", [])),
-        )
-    if provider_name == "echo":
-        return EchoTranslationProvider()
-    if provider_name == "openai_compatible":
-        return OpenAICompatibleTranslationProvider(
-            api_base_url=str(translation["api_base_url"]).strip(),
-            api_key=str(translation["api_key"]).strip(),
-            model=str(translation["model"]).strip(),
-            timeout_seconds=int(translation["timeout_seconds"]),
-        )
-    raise PipelineError(f"未知翻译 provider: {provider_name}")
+    return OpenAICompatibleTranslationProvider(
+        api_base_url=str(translation["api_base_url"]).strip(),
+        api_key=str(translation["api_key"]).strip(),
+        model=str(translation["model"]).strip(),
+        timeout_seconds=int(translation["timeout_seconds"]),
+    )
 
 
 def translate_segments(context: TaskContext, segments: list[dict[str, Any]]) -> dict[str, list[str]]:
