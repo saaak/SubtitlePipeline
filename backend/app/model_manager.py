@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import shutil
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+DOWNLOAD_STALL_TIMEOUT_SECONDS = 120
+DOWNLOAD_PROGRESS_POLL_SECONDS = 3
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,11 @@ class ModelSpec:
 class DownloadState:
     status: str
     error: str | None = None
+    stalled: bool = False
+    manual_download_url: str | None = None
+    last_progress_at: float = 0
+    last_size_bytes: int = 0
+    token: int = 0
 
 
 KNOWN_MODELS = (
@@ -30,11 +39,12 @@ KNOWN_MODELS = (
 
 
 class ModelManager:
-    def __init__(self, models_root: str = "/models"):
+    def __init__(self, models_root: str = "/models", stall_timeout_seconds: int = DOWNLOAD_STALL_TIMEOUT_SECONDS):
         self.models_root = Path(models_root)
         self.models_root.mkdir(parents=True, exist_ok=True)
         self._states: dict[str, DownloadState] = {}
         self._lock = threading.RLock()
+        self.stall_timeout_seconds = max(int(stall_timeout_seconds), 1)
 
     def get_spec(self, name: str) -> ModelSpec:
         for spec in KNOWN_MODELS:
@@ -71,6 +81,8 @@ class ModelManager:
                     "current": spec.name == current_model,
                     "path": str(model_dir),
                     "error": state.error if state and state.error else None,
+                    "stalled": bool(state and state.stalled),
+                    "manual_download_url": state.manual_download_url if state else self._manual_download_url(spec),
                 }
             )
         return items
@@ -85,16 +97,25 @@ class ModelManager:
     def start_download(self, name: str) -> None:
         spec = self.get_spec(name)
         model_dir = self.models_root / name
+        now = time.time()
         with self._lock:
             state = self._states.get(name)
             if state and state.status == "downloading":
                 raise ValueError(f"模型 {name} 正在下载中")
             if self._is_installed(model_dir):
                 raise ValueError(f"模型 {name} 已安装")
-            self._states[name] = DownloadState(status="downloading")
+            token = int(now * 1000)
+            self._states[name] = DownloadState(
+                status="downloading",
+                stalled=False,
+                manual_download_url=self._manual_download_url(spec),
+                last_progress_at=now,
+                last_size_bytes=self._directory_size(model_dir),
+                token=token,
+            )
         model_dir.mkdir(parents=True, exist_ok=True)
-        thread = threading.Thread(target=self._download_model, args=(spec,), daemon=True)
-        thread.start()
+        threading.Thread(target=self._download_model, args=(spec, token), daemon=True).start()
+        threading.Thread(target=self._watch_download, args=(spec, token), daemon=True).start()
 
     def delete_model(self, name: str, current_model: str) -> None:
         self.get_spec(name)
@@ -110,7 +131,7 @@ class ModelManager:
         with self._lock:
             self._states.pop(name, None)
 
-    def _download_model(self, spec: ModelSpec) -> None:
+    def _download_model(self, spec: ModelSpec, token: int) -> None:
         model_dir = self.models_root / spec.name
         try:
             from huggingface_hub import snapshot_download
@@ -119,10 +140,58 @@ class ModelManager:
         except Exception as exc:
             shutil.rmtree(model_dir, ignore_errors=True)
             with self._lock:
-                self._states[spec.name] = DownloadState(status="not_installed", error=str(exc))
+                state = self._states.get(spec.name)
+                if not state or state.token != token:
+                    return
+                self._states[spec.name] = DownloadState(
+                    status="not_installed",
+                    error=self._build_manual_download_message(spec, str(exc)),
+                    stalled=False,
+                    manual_download_url=self._manual_download_url(spec),
+                    token=token,
+                )
             return
         with self._lock:
-            self._states[spec.name] = DownloadState(status="installed")
+            state = self._states.get(spec.name)
+            if not state or state.token != token:
+                return
+            self._states[spec.name] = DownloadState(
+                status="installed",
+                stalled=False,
+                manual_download_url=self._manual_download_url(spec),
+                token=token,
+            )
+
+    def _watch_download(self, spec: ModelSpec, token: int) -> None:
+        model_dir = self.models_root / spec.name
+        while True:
+            time.sleep(DOWNLOAD_PROGRESS_POLL_SECONDS)
+            current_size = self._directory_size(model_dir)
+            now = time.time()
+            with self._lock:
+                state = self._states.get(spec.name)
+                if not state or state.token != token or state.status != "downloading":
+                    return
+                if current_size > state.last_size_bytes:
+                    self._states[spec.name] = DownloadState(
+                        status="downloading",
+                        stalled=False,
+                        manual_download_url=state.manual_download_url,
+                        last_progress_at=now,
+                        last_size_bytes=current_size,
+                        token=token,
+                    )
+                    continue
+                if now - state.last_progress_at >= self.stall_timeout_seconds and not state.stalled:
+                    self._states[spec.name] = DownloadState(
+                        status="downloading",
+                        error=self._build_manual_download_message(spec, f"下载超过 {self.stall_timeout_seconds} 秒没有进度"),
+                        stalled=True,
+                        manual_download_url=state.manual_download_url,
+                        last_progress_at=state.last_progress_at,
+                        last_size_bytes=current_size,
+                        token=token,
+                    )
 
     def _calculate_progress(self, model_dir: Path, estimated_size_bytes: int) -> int:
         if estimated_size_bytes <= 0 or not model_dir.exists():
@@ -137,3 +206,14 @@ class ModelManager:
         if not model_dir.exists() or not model_dir.is_dir():
             return False
         return any(model_dir.iterdir())
+
+    def _directory_size(self, model_dir: Path) -> int:
+        if not model_dir.exists():
+            return 0
+        return sum(path.stat().st_size for path in model_dir.rglob("*") if path.is_file())
+
+    def _manual_download_url(self, spec: ModelSpec) -> str:
+        return f"https://huggingface.co/{spec.repo_id}"
+
+    def _build_manual_download_message(self, spec: ModelSpec, reason: str) -> str:
+        return f"{reason}。可前往 {self._manual_download_url(spec)} 手动下载后挂载到 /models/{spec.name}"

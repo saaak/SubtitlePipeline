@@ -309,6 +309,11 @@ select {
   color: #334155;
 }
 
+.status-chip.stalled {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
 .progress-block,
 .progress-inline {
   display: grid;

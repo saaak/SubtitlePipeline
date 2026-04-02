@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.model_manager import ModelManager
 from app.pipeline import TaskContext, translate_segments
 from app.runtime import ScannerService, WorkerService
 from app.store import Database
@@ -121,6 +123,20 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
         updated = self.database.set_setup_complete(True)
         self.assertTrue(updated["setup_complete"])
+
+    @patch("app.model_manager.DOWNLOAD_PROGRESS_POLL_SECONDS", 0.1)
+    def test_model_download_stall_exposes_manual_download_hint(self) -> None:
+        manager = ModelManager(str(self.models_dir), stall_timeout_seconds=1)
+        fake_hub = types.SimpleNamespace(snapshot_download=lambda **kwargs: time.sleep(2))
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hub}, clear=False):
+            manager.start_download("tiny")
+            time.sleep(1.2)
+
+        item = next(model for model in manager.list_models(current_model="small") if model["name"] == "tiny")
+        self.assertEqual(item["status"], "downloading")
+        self.assertTrue(item["stalled"])
+        self.assertIn("huggingface.co/Systran/faster-whisper-tiny", item["manual_download_url"])
+        self.assertIn("/models/tiny", item["error"])
 
     @patch("app.pipeline.httpx.post")
     def test_api_endpoints_cover_system_status_translation_and_models(self, mock_post: MagicMock) -> None:

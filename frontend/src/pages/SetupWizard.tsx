@@ -169,6 +169,13 @@ export function SetupWizard({
                     <span>{item.progress}%</span>
                   </div>
                 ) : null}
+                {item.stalled ? <span className="status-chip stalled">下载超时</span> : null}
+                {item.error ? <span className="muted">{item.error}</span> : null}
+                {item.stalled && item.manual_download_url ? (
+                  <a href={item.manual_download_url} target="_blank" rel="noreferrer" onClick={(event) => event.stopPropagation()}>
+                    前往 HuggingFace 手动下载
+                  </a>
+                ) : null}
                 <span className="muted">{item.path}</span>
                 <div className="inline-actions">
                   <button

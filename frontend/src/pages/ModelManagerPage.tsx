@@ -105,7 +105,13 @@ export function ModelManagerPage() {
                         <span>{item.progress}%</span>
                       </div>
                     ) : null}
+                    {item.stalled ? <span className="status-chip stalled">下载超时</span> : null}
                     {item.error ? <span className="muted">{item.error}</span> : null}
+                    {item.stalled && item.manual_download_url ? (
+                      <a href={item.manual_download_url} target="_blank" rel="noreferrer">
+                        前往 HuggingFace 手动下载
+                      </a>
+                    ) : null}
                   </div>
                 </td>
                 <td className="task-file">{item.path}</td>
@@ -138,6 +144,7 @@ export function ModelManagerPage() {
         <h2>使用建议</h2>
         <ul className="simple-list">
           <li>下载中的模型会自动展示进度，页面每 2 秒刷新一次。</li>
+          <li>若下载超过一段时间没有进度，页面会给出超时提示与对应模型的手动下载地址。</li>
           <li>切换模型后会标记需要重启，任务页面会提示是否存在系统级变更。</li>
           <li>
             若首次部署后尚未完成初始化，可前往 <Link to="/setup">引导向导</Link> 完成模型准备与翻译配置。

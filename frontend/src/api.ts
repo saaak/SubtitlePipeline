@@ -105,6 +105,8 @@ export type ModelItem = {
   current: boolean
   path: string
   error?: string | null
+  stalled?: boolean
+  manual_download_url?: string | null
 }
 
 export type ModelListResponse = {
