@@ -40,6 +40,32 @@ npm install
 npm run dev
 ```
 
+## 真实处理模式
+
+- `processing.backend_mode = mock` 时使用 mock 音频与 mock ASR
+- `processing.backend_mode = real` 时改为真实 FFmpeg + WhisperX
+- `translation.provider` 当前支持：
+  - `mock`
+  - `echo`
+  - `openai_compatible`
+- 如只想先验证真实识别，可设置：
+  - `processing.backend_mode = real`
+  - `translation.enabled = false`
+
+### 本机真实处理依赖
+
+```bash
+pip install whisperx
+ffmpeg -version
+```
+
+### OpenAI 兼容翻译配置
+
+- `translation.provider = openai_compatible`
+- `translation.api_base_url = https://api.openai.com`
+- `translation.api_key = <你的密钥>`
+- `translation.model = gpt-4o-mini`
+
 ## Docker
 
 ### CPU 默认镜像

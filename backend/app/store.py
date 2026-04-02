@@ -64,6 +64,8 @@ class Database:
                     file_id INTEGER,
                     file_path TEXT NOT NULL,
                     file_path_key TEXT NOT NULL,
+                    source_size_bytes INTEGER NOT NULL DEFAULT 0,
+                    source_mtime REAL NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     stage TEXT NOT NULL DEFAULT 'queued',
                     progress REAL NOT NULL DEFAULT 0,
@@ -107,6 +109,15 @@ class Database:
                 );
                 """
             )
+            self._ensure_column(connection, "tasks", "source_size_bytes", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "tasks", "source_mtime", "REAL NOT NULL DEFAULT 0")
+            connection.execute(
+                """
+                UPDATE tasks
+                SET source_size_bytes = COALESCE(source_size_bytes, 0),
+                    source_mtime = COALESCE(source_mtime, 0)
+                """
+            )
             defaults = copy_default_config()
             now = utc_now()
             for group_name, group_values in defaults.items():
@@ -121,6 +132,12 @@ class Database:
                         """,
                         (group_name, key_name, json.dumps(value), scope, restart_required, now),
                     )
+
+    def _ensure_column(self, connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+        columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        if any(column["name"] == column_name for column in columns):
+            return
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
     def get_config(self) -> dict[str, Any]:
         defaults = copy_default_config()
@@ -350,22 +367,40 @@ class Database:
             ).fetchone()
         return row is not None
 
-    def create_task(self, file_id: int, file_path: str) -> dict[str, Any]:
+    def has_task_for_file_version(self, path_key: str, size_bytes: int, mtime: float) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM tasks
+                WHERE file_path_key = ?
+                  AND source_size_bytes = ?
+                  AND source_mtime = ?
+                LIMIT 1
+                """,
+                (path_key, size_bytes, mtime),
+            ).fetchone()
+        return row is not None
+
+    def create_task(self, file_id: int, file_path: str, size_bytes: int, mtime: float) -> dict[str, Any]:
         config = self.get_config()
         now = utc_now()
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO tasks (
-                    file_id, file_path, file_path_key, status, stage, progress, retry_count, max_retries,
+                    file_id, file_path, file_path_key, source_size_bytes, source_mtime,
+                    status, stage, progress, retry_count, max_retries,
                     cancel_requested, restart_required, created_at, updated_at
                 )
-                VALUES (?, ?, ?, 'pending', 'queued', 0, 0, ?, 0, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', 'queued', 0, 0, ?, 0, ?, ?, ?)
                 """,
                 (
                     file_id,
                     file_path,
                     normalize_path(file_path),
+                    size_bytes,
+                    mtime,
                     int(config["processing"]["max_retries"]),
                     1 if config["meta"]["restart_required"] else 0,
                     now,

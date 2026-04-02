@@ -33,6 +33,9 @@ DEFAULT_CONFIG = {
         "timeout_seconds": 30,
         "mock_prefix_template": "[{lang}] ",
         "fail_languages": [],
+        "api_base_url": "https://api.openai.com",
+        "api_key": "",
+        "model": "gpt-4o-mini",
     },
     "subtitle": {
         "bilingual": True,

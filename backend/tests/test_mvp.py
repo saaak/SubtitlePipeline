@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import os
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -13,6 +14,7 @@ if str(ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.pipeline import TaskContext, translate_segments
 from app.runtime import ScannerService, WorkerService
 from app.store import Database
 
@@ -158,6 +160,39 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         logs = self.database.get_logs(task["id"], page=1, page_size=50)
         self.assertGreaterEqual(logs.total, 6)
 
+    def test_processed_file_version_is_not_requeued_without_changes(self) -> None:
+        video_path = self.data_dir / "stable_once.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        scanner = ScannerService(self.database)
+        scanner.scan_once()
+        second_scan = scanner.scan_once()
+        self.assertEqual(second_scan.queued, 1)
+
+        worker = WorkerService(self.database)
+        self.assertTrue(worker.process_next_task())
+
+        third_scan = scanner.scan_once()
+        self.assertEqual(third_scan.queued, 0)
+        tasks = self.database.list_tasks(page=1, page_size=10).items
+        self.assertEqual(len(tasks), 1)
+
+    def test_changed_file_version_is_requeued(self) -> None:
+        video_path = self.data_dir / "updated.mp4"
+        video_path.write_bytes(b"version-one")
+        scanner = ScannerService(self.database)
+        scanner.scan_once()
+        scanner.scan_once()
+
+        worker = WorkerService(self.database)
+        self.assertTrue(worker.process_next_task())
+
+        video_path.write_bytes(b"version-two-with-different-size")
+        scanner.scan_once()
+        next_scan = scanner.scan_once()
+        self.assertEqual(next_scan.queued, 1)
+        tasks = self.database.list_tasks(page=1, page_size=10).items
+        self.assertEqual(len(tasks), 2)
+
     def test_failed_translation_requeues_then_fails(self) -> None:
         self.database.update_config(
             {
@@ -209,6 +244,47 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIsNotNone(frozen_task)
         assert frozen_task is not None
         self.assertEqual(frozen_task["config_snapshot"]["translation"]["target_languages"], ["zh-CN"])
+
+    @patch("app.pipeline.httpx.post")
+    def test_openai_compatible_translation_provider(self, mock_post: MagicMock) -> None:
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": '["你好", "世界"]'
+                    }
+                }
+            ]
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_post.return_value = mock_response
+
+        snapshot = self.database.get_config()
+        snapshot["translation"].update(
+            {
+                "provider": "openai_compatible",
+                "api_base_url": "https://api.openai.com",
+                "api_key": "test-key",
+                "model": "gpt-4o-mini",
+                "target_languages": ["zh-CN"],
+            }
+        )
+        context = TaskContext(
+            task_id=1,
+            file_path=str(self.data_dir / "provider_demo.mp4"),
+            config_snapshot=snapshot,
+            work_dir=self.config_dir / "work" / "provider",
+        )
+        segments = [
+            {"start": 0.0, "end": 1.0, "text": "hello"},
+            {"start": 1.0, "end": 2.0, "text": "world"},
+        ]
+
+        translations = translate_segments(context, segments)
+        self.assertEqual(translations["zh-CN"], ["你好", "世界"])
+        request_payload = mock_post.call_args.kwargs["json"]
+        self.assertEqual(request_payload["model"], "gpt-4o-mini")
 
 
 if __name__ == "__main__":

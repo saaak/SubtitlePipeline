@@ -48,10 +48,22 @@ class ScannerService:
             if observed["stable_hits"] < 2:
                 skipped += 1
                 continue
+            if self.database.has_task_for_file_version(
+                observed["path_key"],
+                observed["size_bytes"],
+                observed["mtime"],
+            ):
+                skipped += 1
+                continue
             if self.database.has_active_task(observed["path_key"]):
                 skipped += 1
                 continue
-            self.database.create_task(observed["file_id"], observed["path"])
+            self.database.create_task(
+                observed["file_id"],
+                observed["path"],
+                observed["size_bytes"],
+                observed["mtime"],
+            )
             queued += 1
         return ScanResult(scanned=scanned, queued=queued, skipped=skipped)
 

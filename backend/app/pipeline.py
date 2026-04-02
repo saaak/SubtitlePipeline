@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 
 class PipelineError(RuntimeError):
     pass
@@ -44,6 +46,58 @@ class MockTranslationProvider(TranslationProvider):
 class EchoTranslationProvider(TranslationProvider):
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
         return [f"{text} ({target_language})" for text in texts]
+
+
+class OpenAICompatibleTranslationProvider(TranslationProvider):
+    def __init__(self, api_base_url: str, api_key: str, model: str, timeout_seconds: int):
+        self.api_base_url = api_base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.timeout_seconds = timeout_seconds
+
+    def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
+        if not self.api_key:
+            raise PipelineError("translation.api_key 未配置，无法调用真实翻译 provider")
+        endpoint = (
+            f"{self.api_base_url}/chat/completions"
+            if self.api_base_url.endswith("/v1")
+            else f"{self.api_base_url}/v1/chat/completions"
+        )
+        prompt = (
+            f"Translate each input string to {target_language}. "
+            "Return a JSON array of translated strings only. "
+            "Keep the same order and array length. Do not include markdown."
+        )
+        response = httpx.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": [
+                    {"role": "developer", "content": prompt},
+                    {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
+                ],
+            },
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise PipelineError("真实翻译 provider 返回格式无效") from exc
+        if not isinstance(content, str):
+            raise PipelineError("真实翻译 provider 未返回文本内容")
+        try:
+            translated = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise PipelineError("真实翻译 provider 未返回 JSON 数组") from exc
+        if not isinstance(translated, list) or len(translated) != len(texts):
+            raise PipelineError("真实翻译 provider 返回结果数量与输入不一致")
+        return [str(item).strip() for item in translated]
 
 
 def ensure_parent(path: Path) -> None:
@@ -147,6 +201,13 @@ def get_translation_provider(config_snapshot: dict[str, Any]) -> TranslationProv
         )
     if provider_name == "echo":
         return EchoTranslationProvider()
+    if provider_name == "openai_compatible":
+        return OpenAICompatibleTranslationProvider(
+            api_base_url=str(translation["api_base_url"]).strip(),
+            api_key=str(translation["api_key"]).strip(),
+            model=str(translation["model"]).strip(),
+            timeout_seconds=int(translation["timeout_seconds"]),
+        )
     raise PipelineError(f"未知翻译 provider: {provider_name}")
 
 
