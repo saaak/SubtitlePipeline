@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(openspec instructions:*)",
-      "Bash(openspec validate:*)"
+      "Bash(openspec validate:*)",
+      "Bash(openspec status:*)",
+      "Bash(mkdir -p openspec/changes/archive)",
+      "Bash(mv openspec/changes/build-local-subtitle-pipeline-mvp openspec/changes/archive/2026-04-02-build-local-subtitle-pipeline-mvp)"
     ]
   }
 }
