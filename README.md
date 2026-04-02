@@ -54,6 +54,14 @@ docker run -p 8000:8000 \
   subpipeline:cpu
 ```
 
+### CPU 默认 Compose
+
+```bash
+docker compose up --build -d
+docker compose logs -f
+docker compose down
+```
+
 ### GPU 可选镜像
 
 ```bash
@@ -64,4 +72,12 @@ docker run --gpus all -p 8000:8000 \
   -v ${PWD}/models:/models \
   -v ${PWD}/config:/config \
   subpipeline:gpu
+```
+
+### GPU 可选 Compose
+
+```bash
+docker compose -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.gpu.yml logs -f
+docker compose -f docker-compose.gpu.yml down
 ```

@@ -1,0 +1,20 @@
+services:
+  subpipeline:
+    build:
+      context: .
+      dockerfile: container/Dockerfile.gpu
+    image: subpipeline:gpu
+    container_name: subpipeline-gpu
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SUBPIPELINE_PORT: "8000"
+      SUBPIPELINE_DB_PATH: /config/subpipeline.db
+      SUBPIPELINE_FRONTEND_DIST: /app/frontend/dist
+    volumes:
+      - ./data:/data
+      - ./output:/output
+      - ./models:/models
+      - ./config:/config
+    gpus: all
