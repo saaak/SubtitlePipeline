@@ -3,3 +3,4 @@ uvicorn==0.35.0
 pydantic==2.11.7
 httpx==0.28.1
 huggingface_hub==0.35.3
+whisperx==3.8.5
