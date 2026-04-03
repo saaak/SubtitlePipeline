@@ -118,9 +118,11 @@ class WorkerService:
             result_payload = self._process_claimed_task(task)
             self.database.mark_task_done(task["id"], result_payload)
         except CancellationRequested:
-            self.database.mark_task_cancelled(task["id"], task["stage"])
+            latest = self.database.get_task(task["id"])
+            self.database.mark_task_cancelled(task["id"], latest["stage"] if latest else task["stage"])
         except Exception as exc:
-            self.database.mark_task_failure(task["id"], task["stage"], str(exc))
+            latest = self.database.get_task(task["id"])
+            self.database.mark_task_failure(task["id"], latest["stage"] if latest else task["stage"], str(exc))
         return True
 
     def _process_claimed_task(self, task: dict[str, Any]) -> dict[str, Any]:
@@ -188,8 +190,16 @@ class WorkerService:
             translations = self._run_stage(
                 task["id"],
                 "translate",
-                80,
-                lambda: translate_segments(context, processed_segments),
+                60,
+                lambda: translate_segments(
+                    context,
+                    processed_segments,
+                    progress_callback=lambda current, total: self.database.update_task_stage(
+                        task["id"],
+                        "translate",
+                        60 + int(20 * current / total),
+                    ),
+                ),
             )
             save_translations(context, translations)
         if start_stage in {"queued", "extract_audio", "asr", "text_process", "translate", "subtitle_render"}:

@@ -73,6 +73,8 @@ export type AppConfig = {
     api_base_url: string
     api_key: string
     model: string
+    content_type: TranslationContentType
+    custom_prompt: string
   }
   subtitle: {
     bilingual: boolean
@@ -128,6 +130,8 @@ export type TranslationTestPayload = {
   model: string
   timeout_seconds: number
   target_language?: string
+  content_type?: TranslationContentType
+  custom_prompt?: string
 }
 
 export type TranslationTestResponse = {
@@ -147,6 +151,25 @@ export type BrowseDirectoryResponse = {
   parent?: string | null
   dirs: string[]
 }
+
+export type TranslationContentType =
+  | 'general'
+  | 'movie'
+  | 'documentary'
+  | 'anime'
+  | 'tech_talk'
+  | 'variety_show'
+  | 'news'
+
+export const translationContentTypeOptions: Array<{ value: TranslationContentType; label: string }> = [
+  { value: 'general', label: '通用' },
+  { value: 'movie', label: '电影/电视剧' },
+  { value: 'documentary', label: '纪录片' },
+  { value: 'anime', label: '动漫' },
+  { value: 'tech_talk', label: '技术讲座' },
+  { value: 'variety_show', label: '综艺/脱口秀' },
+  { value: 'news', label: '新闻' },
+]
 
 export const defaultAppConfig: AppConfig = {
   file: {
@@ -179,6 +202,8 @@ export const defaultAppConfig: AppConfig = {
     api_base_url: 'https://api.openai.com',
     api_key: '',
     model: 'gpt-4o-mini',
+    content_type: 'general',
+    custom_prompt: '',
   },
   subtitle: {
     bilingual: true,

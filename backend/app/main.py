@@ -52,6 +52,8 @@ class TranslationTestRequest(BaseModel):
     model: str = ""
     timeout_seconds: int = 30
     target_language: str = "zh-CN"
+    content_type: str = "general"
+    custom_prompt: str = ""
 
 
 class SetupCompleteRequest(BaseModel):
@@ -282,6 +284,8 @@ def create_app() -> FastAPI:
                         "api_key": request.api_key,
                         "model": request.model,
                         "timeout_seconds": request.timeout_seconds,
+                    "content_type": request.content_type,
+                    "custom_prompt": request.custom_prompt,
                     }
                 }
             )

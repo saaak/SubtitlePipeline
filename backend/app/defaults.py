@@ -33,6 +33,8 @@ DEFAULT_CONFIG = {
         "api_base_url": "https://api.openai.com",
         "api_key": "",
         "model": "gpt-4o-mini",
+        "content_type": "general",
+        "custom_prompt": "",
     },
     "subtitle": {
         "bilingual": True,

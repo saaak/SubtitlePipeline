@@ -9,6 +9,7 @@ import {
   getModels,
   ModelListResponse,
   testTranslation,
+  translationContentTypeOptions,
   updateConfig,
 } from '../api'
 import { DirectoryPicker } from '../components/DirectoryPicker'
@@ -159,6 +160,7 @@ export function SettingsPage() {
     () => models.items.find((item) => item.current),
     [models.items],
   )
+  const usingCustomPrompt = config.translation.custom_prompt.trim().length > 0
 
   const submit = async () => {
     setSaving(true)
@@ -206,6 +208,8 @@ export function SettingsPage() {
         model: config.translation.model,
         timeout_seconds: config.translation.timeout_seconds,
         target_language: config.translation.target_languages[0] || 'zh-CN',
+        content_type: config.translation.content_type,
+        custom_prompt: config.translation.custom_prompt,
       })
       if (result.success) {
         setMessage(result.message)
@@ -369,6 +373,31 @@ export function SettingsPage() {
                 onChange={(event) => setField('translation', 'max_retries', Number(event.target.value))}
               />
             </label>
+            <label>
+              <span>内容类型</span>
+              <select
+                disabled={!config.translation.enabled || usingCustomPrompt}
+                value={config.translation.content_type}
+                onChange={(event) => setField('translation', 'content_type', event.target.value as AppConfig['translation']['content_type'])}
+              >
+                {translationContentTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="field-block">
+            <span className="field-label">自定义 Prompt</span>
+            <textarea
+              disabled={!config.translation.enabled}
+              rows={5}
+              value={config.translation.custom_prompt}
+              placeholder="留空使用预设，填写后将替换预设 prompt"
+              onChange={(event) => setField('translation', 'custom_prompt', event.target.value)}
+            />
+            <span className="muted">{usingCustomPrompt ? '当前已启用自定义 prompt，内容类型预设已禁用。' : '留空时使用上方内容类型预设。'}</span>
           </div>
           <TagEditor
             label="目标语言"

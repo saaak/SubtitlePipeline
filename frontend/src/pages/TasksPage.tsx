@@ -1,11 +1,12 @@
 import { useCallback, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { cancelTask, getTasks, retryTask, TaskListResponse } from '../api'
+import { cancelTask, checkResumeFeasibility, getTasks, ResumeCheckResponse, retryTask, TaskListResponse } from '../api'
 import { usePolling } from '../hooks'
 
 export function TasksPage() {
   const [data, setData] = useState<TaskListResponse>({ items: [], total: 0, page: 1, page_size: 20 })
+  const [resumeChecks, setResumeChecks] = useState<Record<number, ResumeCheckResponse>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const navigate = useNavigate()
@@ -13,7 +14,19 @@ export function TasksPage() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      setData(await getTasks())
+      const nextData = await getTasks()
+      setData(nextData)
+      const retryableTasks = nextData.items.filter((task) => ['failed', 'cancelled', 'done'].includes(task.status))
+      const checkEntries = await Promise.all(
+        retryableTasks.map(async (task) => {
+          try {
+            return [task.id, await checkResumeFeasibility(task.id)] as const
+          } catch {
+            return [task.id, { can_resume: false, missing: [] }] as const
+          }
+        }),
+      )
+      setResumeChecks(Object.fromEntries(checkEntries))
       setError('')
     } catch (err) {
       setError(err instanceof Error ? err.message : '任务读取失败')
@@ -24,10 +37,12 @@ export function TasksPage() {
 
   usePolling(load, 3000, [])
 
-  const handleAction = async (taskId: number, type: 'cancel' | 'retry') => {
+  const handleAction = async (taskId: number, type: 'cancel' | 'restart' | 'resume') => {
     try {
       if (type === 'cancel') {
         await cancelTask(taskId)
+      } else if (type === 'resume') {
+        await retryTask(taskId, 'resume')
       } else {
         await retryTask(taskId, 'restart')
       }
@@ -70,23 +85,39 @@ export function TasksPage() {
                 <td>{task.stage}</td>
                 <td>{task.progress}%</td>
                 <td>{new Date(task.updated_at).toLocaleString()}</td>
-                <td className="actions-cell">
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void handleAction(task.id, 'retry')
-                    }}
-                  >
-                    重试
-                  </button>
-                  <button
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      void handleAction(task.id, 'cancel')
-                    }}
-                  >
-                    取消
-                  </button>
+                <td className="actions-cell wrap">
+                  {['failed', 'cancelled', 'done'].includes(task.status) ? (
+                    <>
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void handleAction(task.id, 'restart')
+                        }}
+                      >
+                        重新执行
+                      </button>
+                      <button
+                        disabled={!resumeChecks[task.id]?.can_resume}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void handleAction(task.id, 'resume')
+                        }}
+                      >
+                        继续执行
+                      </button>
+                      {resumeChecks[task.id] && !resumeChecks[task.id].can_resume ? <span className="muted">中间文件缺失</span> : null}
+                    </>
+                  ) : null}
+                  {task.status === 'processing' ? (
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        void handleAction(task.id, 'cancel')
+                      }}
+                    >
+                      取消
+                    </button>
+                  ) : null}
                 </td>
               </tr>
             ))}

@@ -12,6 +12,7 @@ import {
   ModelListResponse,
   setSetupComplete,
   testTranslation,
+  translationContentTypeOptions,
   updateConfig,
 } from '../api'
 
@@ -78,6 +79,7 @@ export function SetupWizard({
         model: config.translation.model,
         timeout_seconds: config.translation.timeout_seconds,
         target_language: config.translation.target_languages[0] || 'zh-CN',
+        content_type: config.translation.content_type,
       })
       if (result.success) {
         setMessage(result.message)
@@ -295,6 +297,28 @@ export function SetupWizard({
                 }
               />
             </label>
+            <label>
+              <span>内容类型</span>
+              <select
+                disabled={!config.translation.enabled}
+                value={config.translation.content_type}
+                onChange={(event) =>
+                  setConfig((current) => ({
+                    ...current,
+                    translation: {
+                      ...current.translation,
+                      content_type: event.target.value as AppConfig['translation']['content_type'],
+                    },
+                  }))
+                }
+              >
+                {translationContentTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="page-actions">
             <button onClick={() => setStep(1)}>上一步</button>
@@ -327,6 +351,14 @@ export function SetupWizard({
             <div className="summary-item">
               <span>目标语言</span>
               <strong>{config.translation.enabled ? config.translation.target_languages.join(', ') || '-' : '-'}</strong>
+            </div>
+            <div className="summary-item">
+              <span>内容类型</span>
+              <strong>
+                {config.translation.enabled
+                  ? translationContentTypeOptions.find((option) => option.value === config.translation.content_type)?.label || config.translation.content_type
+                  : '-'}
+              </strong>
             </div>
           </div>
           <div className="page-actions">

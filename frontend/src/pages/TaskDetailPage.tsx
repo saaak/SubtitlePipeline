@@ -1,32 +1,22 @@
 import { useCallback, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
-import { checkResumeFeasibility, getTask, getTaskLogs, LogResponse, retryTask, Task } from '../api'
+import { getTask, getTaskLogs, LogResponse, Task } from '../api'
 import { usePolling } from '../hooks'
 
 export function TaskDetailPage() {
   const { taskId } = useParams()
   const [task, setTask] = useState<Task | null>(null)
   const [logs, setLogs] = useState<LogResponse>({ items: [], total: 0, page: 1, page_size: 20 })
-  const [resumeCheck, setResumeCheck] = useState<{ can_resume: boolean; missing: string[] }>({ can_resume: false, missing: [] })
-  const [retrying, setRetrying] = useState<'restart' | 'resume' | null>(null)
   const [page, setPage] = useState(1)
   const [error, setError] = useState('')
-
-  const shouldShowRetryActions = task ? ['failed', 'cancelled', 'done'].includes(task.status) : false
 
   const loadTask = useCallback(async () => {
     if (!taskId) {
       return
     }
     try {
-      const nextTask = await getTask(taskId)
-      setTask(nextTask)
-      if (['failed', 'cancelled', 'done'].includes(nextTask.status)) {
-        setResumeCheck(await checkResumeFeasibility(nextTask.id))
-      } else {
-        setResumeCheck({ can_resume: false, missing: [] })
-      }
+      setTask(await getTask(taskId))
       setError('')
     } catch (err) {
       setError(err instanceof Error ? err.message : '任务详情读取失败')
@@ -59,22 +49,6 @@ export function TaskDetailPage() {
     return <div className="alert error">缺少任务 ID</div>
   }
 
-  const handleRetry = async (mode: 'restart' | 'resume') => {
-    if (!task) {
-      return
-    }
-    setRetrying(mode)
-    try {
-      await retryTask(task.id, mode)
-      await poll()
-      setError('')
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '任务重试失败')
-    } finally {
-      setRetrying(null)
-    }
-  }
-
   return (
     <section>
       <header className="page-header">
@@ -90,17 +64,6 @@ export function TaskDetailPage() {
           <div className="detail-grid">
             <div className="card">
               <h2>概览</h2>
-              {shouldShowRetryActions ? (
-                <div className="task-detail-actions">
-                  <button disabled={retrying !== null} onClick={() => void handleRetry('restart')}>
-                    {retrying === 'restart' ? '重新执行中…' : '重新执行'}
-                  </button>
-                  <button disabled={retrying !== null || !resumeCheck.can_resume} onClick={() => void handleRetry('resume')}>
-                    {retrying === 'resume' ? '继续执行中…' : '继续执行'}
-                  </button>
-                </div>
-              ) : null}
-              {shouldShowRetryActions && !resumeCheck.can_resume ? <div className="muted">中间文件缺失，需要重新执行</div> : null}
               <dl className="detail-list">
                 <div>
                   <dt>文件</dt>

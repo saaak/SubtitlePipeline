@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,8 +16,39 @@ from typing import Any
 import openai
 from openai import OpenAI
 
+logger = logging.getLogger(__name__)
+
+CHUNK_SIZE = 50
+CONTEXT_SIZE = 10
+MAX_CHUNK_WORKERS = 3
+MAX_CHUNK_RETRIES = 5
+
+TRANSLATION_PRESETS = {
+    "general": "You are a professional subtitle translator. Keep the translation natural, accurate, concise, and easy to read on screen.",
+    "movie": "You are a professional film and TV subtitle translator. Keep dialogue natural and conversational, preserve character voice, and localize idioms smoothly.",
+    "documentary": "You are a documentary subtitle translator. Keep the tone clear, informative, and slightly formal. Preserve important terms accurately.",
+    "anime": "You are an anime subtitle translator. Preserve character tone, emotional rhythm, and genre-specific expressions while keeping subtitles natural.",
+    "tech_talk": "You are a technical talk subtitle translator. Keep terminology precise, preserve key English technical terms when appropriate, and maintain logical clarity.",
+    "variety_show": "You are a variety show subtitle translator. Keep the tone lively, witty, and audience-friendly while preserving humor and timing.",
+    "news": "You are a news subtitle translator. Keep the tone formal, objective, and consistent with standard naming conventions for people and places.",
+}
+
+FORMAT_INSTRUCTION = (
+    "Translate the numbered lines into {target_language}. "
+    'Return exactly one line per item using the format "编号|译文". '
+    "Only translate the [翻译] section when it exists. "
+    "The [上文] and [下文] sections are context only and must not be translated. "
+    "If no [翻译] section exists, translate all numbered lines. "
+    "Keep the same ids and line count as the content to translate. "
+    "Do not output markdown, JSON, code fences, explanations, or any extra text."
+)
+
 
 class PipelineError(RuntimeError):
+    pass
+
+
+class TranslationRateLimitError(PipelineError):
     pass
 
 
@@ -31,9 +66,202 @@ class TaskContext:
     using_fallback_intermediates: bool = False
 
 
+@dataclass(frozen=True)
+class ChunkLine:
+    index: int
+    text: str
+
+
+@dataclass(frozen=True)
+class TranslationChunk:
+    start_index: int
+    context_before: list[ChunkLine]
+    main_segments: list[ChunkLine]
+    context_after: list[ChunkLine]
+    use_sections: bool
+
+
 class TranslationProvider:
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
         raise NotImplementedError
+
+
+def build_chunks(
+    segments: list[dict[str, Any]],
+    chunk_size: int = CHUNK_SIZE,
+    context_size: int = CONTEXT_SIZE,
+) -> list[TranslationChunk]:
+    if not segments:
+        return []
+    total = len(segments)
+    use_sections = total > chunk_size
+    chunks: list[TranslationChunk] = []
+    for start in range(0, total, chunk_size):
+        end = min(start + chunk_size, total)
+        context_before = [
+            ChunkLine(index=index, text=str(segments[index]["text"]))
+            for index in range(max(0, start - context_size), start)
+        ]
+        main_segments = [ChunkLine(index=index, text=str(segments[index]["text"])) for index in range(start, end)]
+        context_after = [
+            ChunkLine(index=index, text=str(segments[index]["text"]))
+            for index in range(end, min(total, end + context_size))
+        ]
+        chunks.append(
+            TranslationChunk(
+                start_index=start,
+                context_before=context_before,
+                main_segments=main_segments,
+                context_after=context_after,
+                use_sections=use_sections,
+            )
+        )
+    return chunks
+
+
+def build_chunk_user_message(chunk: TranslationChunk) -> str:
+    def format_lines(lines: list[ChunkLine]) -> str:
+        return "\n".join(f"{line.index}|{line.text}" for line in lines)
+
+    if not chunk.use_sections:
+        return format_lines(chunk.main_segments)
+    parts: list[str] = []
+    if chunk.context_before:
+        parts.extend(["[上文]", format_lines(chunk.context_before)])
+    parts.extend(["[翻译]", format_lines(chunk.main_segments)])
+    if chunk.context_after:
+        parts.extend(["[下文]", format_lines(chunk.context_after)])
+    return "\n\n".join(parts)
+
+
+def strip_code_fence(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def strip_number_prefix(line: str) -> str:
+    return re.sub(r"^\s*\d+\|", "", line, count=1).strip()
+
+
+def parse_numbered_lines(
+    raw_output: str,
+    expected_ids: list[int],
+    source_texts: list[str] | None = None,
+) -> list[str] | None:
+    matches: dict[int, str] = {}
+    expected = set(expected_ids)
+    for line in strip_code_fence(raw_output).splitlines():
+        normalized = line.strip()
+        if not normalized or "|" not in normalized:
+            continue
+        prefix, value = normalized.split("|", 1)
+        if not prefix.strip().isdigit():
+            continue
+        index = int(prefix.strip())
+        if index in expected and index not in matches:
+            matches[index] = value.strip()
+    if len(matches) == len(expected_ids):
+        return [matches[index] for index in expected_ids]
+    if source_texts is not None and expected_ids:
+        matched_ratio = len(matches) / len(expected_ids)
+        if matched_ratio >= 0.8:
+            missing = [index for index in expected_ids if index not in matches]
+            logger.warning("分块翻译部分匹配，缺失编号将回退原文: %s", missing)
+            return [matches.get(index, source_texts[position]) for position, index in enumerate(expected_ids)]
+    return None
+
+
+def parse_chunk_output(
+    raw_output: str,
+    expected_ids: list[int],
+    source_texts: list[str],
+    json_array_parser=None,
+) -> list[str]:
+    numbered = parse_numbered_lines(raw_output, expected_ids, source_texts)
+    if numbered is not None:
+        return numbered
+    if json_array_parser is not None:
+        try:
+            parsed = json_array_parser(raw_output)
+        except PipelineError:
+            parsed = None
+        if isinstance(parsed, list) and len(parsed) == len(expected_ids):
+            return [str(item).strip() for item in parsed]
+    lines = [strip_number_prefix(line) for line in strip_code_fence(raw_output).splitlines() if line.strip()]
+    if len(lines) == len(expected_ids):
+        return lines
+    raise PipelineError("真实翻译 provider 返回结果数量与输入不一致")
+
+
+class ChunkedTranslator:
+    def __init__(
+        self,
+        provider: TranslationProvider,
+        content_type: str,
+        custom_prompt: str,
+        on_chunk_complete=None,
+    ):
+        self.provider = provider
+        self.content_type = content_type
+        self.custom_prompt = custom_prompt
+        self.on_chunk_complete = on_chunk_complete
+        self.pause_event = threading.Event()
+        self.pause_event.set()
+
+    def translate_language(self, segments: list[dict[str, Any]], target_language: str) -> list[str]:
+        chunks = build_chunks(segments, CHUNK_SIZE, CONTEXT_SIZE)
+        if not chunks:
+            return []
+        merged: list[str | None] = [None] * len(segments)
+        pending = list(chunks)
+        attempts = {chunk.start_index: 0 for chunk in chunks}
+        max_workers = MAX_CHUNK_WORKERS
+        while pending:
+            current_batch = pending[:max_workers]
+            pending = pending[max_workers:]
+            rate_limited: list[TranslationChunk] = []
+            max_wait = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._translate_chunk, chunk, target_language): chunk
+                    for chunk in current_batch
+                }
+                for future in as_completed(futures):
+                    chunk = futures[future]
+                    try:
+                        translated_lines = future.result()
+                    except TranslationRateLimitError as exc:
+                        attempts[chunk.start_index] += 1
+                        if attempts[chunk.start_index] > MAX_CHUNK_RETRIES:
+                            raise PipelineError(f"分块翻译多次触发限流: {exc}") from exc
+                        rate_limited.append(chunk)
+                        max_wait = max(max_wait, 2 ** (attempts[chunk.start_index] - 1))
+                    except Exception as exc:
+                        raise PipelineError(str(exc)) from exc
+                    else:
+                        for position, line in enumerate(chunk.main_segments):
+                            merged[line.index] = translated_lines[position]
+                        if self.on_chunk_complete is not None:
+                            self.on_chunk_complete()
+            if rate_limited:
+                self.pause_event.clear()
+                time.sleep(max_wait)
+                self.pause_event.set()
+                if max_workers > 1:
+                    max_workers -= 1
+                pending = rate_limited + pending
+        if any(item is None for item in merged):
+            raise PipelineError("分块翻译结果不完整")
+        return [item or "" for item in merged]
+
+    def _translate_chunk(self, chunk: TranslationChunk, target_language: str) -> list[str]:
+        self.pause_event.wait()
+        if isinstance(self.provider, OpenAICompatibleTranslationProvider):
+            return self.provider.translate_chunk(chunk, target_language, self.content_type, self.custom_prompt)
+        return self.provider.translate_batch([line.text for line in chunk.main_segments], target_language)
 
 
 class OpenAICompatibleTranslationProvider(TranslationProvider):
@@ -50,23 +278,54 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         )
 
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
+        chunk = TranslationChunk(
+            start_index=0,
+            context_before=[],
+            main_segments=[ChunkLine(index=index, text=text) for index, text in enumerate(texts)],
+            context_after=[],
+            use_sections=False,
+        )
+        return self.translate_chunk(chunk, target_language, "general", "")
+
+    def translate_chunk(
+        self,
+        chunk: TranslationChunk,
+        target_language: str,
+        content_type: str,
+        custom_prompt: str,
+    ) -> list[str]:
+        texts = [line.text for line in chunk.main_segments]
         if not texts:
             return []
         if not self.api_key:
             raise PipelineError("translation.api_key 未配置，无法调用真实翻译 provider")
-        prompt = self._build_prompt(target_language)
+        prompt = self._build_prompt(target_language, content_type, custom_prompt)
+        content = self._request_translation(prompt, build_chunk_user_message(chunk))
+        return parse_chunk_output(
+            content,
+            [line.index for line in chunk.main_segments],
+            texts,
+            self._parse_json_array_content,
+        )
+
+    def _resolve_base_url(self) -> str:
+        if self.api_base_url.endswith("/v1"):
+            return self.api_base_url
+        return f"{self.api_base_url}/v1"
+
+    def _request_translation(self, prompt: str, user_content: str) -> str:
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
+                    {"role": "user", "content": user_content},
                 ],
             )
         except openai.AuthenticationError as exc:
             raise PipelineError("翻译服务鉴权失败，请检查 API Key") from exc
         except openai.RateLimitError as exc:
-            raise PipelineError("翻译服务触发限流，请稍后重试") from exc
+            raise TranslationRateLimitError("翻译服务触发限流，请稍后重试") from exc
         except openai.BadRequestError as exc:
             raise PipelineError(f"翻译请求参数无效: {exc}") from exc
         except openai.APIConnectionError as exc:
@@ -81,27 +340,16 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
             raise PipelineError("真实翻译 provider 返回格式无效") from exc
         if not isinstance(content, str):
             raise PipelineError("真实翻译 provider 未返回文本内容")
-        translated = self._parse_json_array_content(content)
-        if not isinstance(translated, list) or len(translated) != len(texts):
-            raise PipelineError("真实翻译 provider 返回结果数量与输入不一致")
-        return [str(item).strip() for item in translated]
+        return content
 
-    def _resolve_base_url(self) -> str:
-        if self.api_base_url.endswith("/v1"):
-            return self.api_base_url
-        return f"{self.api_base_url}/v1"
-
-    def _build_prompt(self, target_language: str) -> str:
-        return (
-            f"Translate each input string to {target_language}. "
-            "Return a JSON array of translated strings only. "
-            "Keep the same order and array length. Do not include markdown or code fences."
-        )
+    def _build_prompt(self, target_language: str, content_type: str = "general", custom_prompt: str = "") -> str:
+        style_prompt = custom_prompt.strip() or TRANSLATION_PRESETS.get(content_type, TRANSLATION_PRESETS["general"])
+        return f"{style_prompt}\n\n{FORMAT_INSTRUCTION.format(target_language=target_language)}"
 
     def _parse_json_array_content(self, content: str) -> list[Any]:
         candidates = [
             content.strip(),
-            self._strip_code_fence(content),
+            strip_code_fence(content),
             self._extract_json_array(content),
         ]
         seen: set[str] = set()
@@ -119,11 +367,7 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         raise PipelineError(f"真实翻译 provider 未返回 JSON 数组，原始响应: {content[:200]}")
 
     def _strip_code_fence(self, content: str) -> str:
-        stripped = content.strip()
-        if stripped.startswith("```") and stripped.endswith("```"):
-            stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
-            stripped = re.sub(r"\s*```$", "", stripped)
-        return stripped.strip()
+        return strip_code_fence(content)
 
     def _extract_json_array(self, content: str) -> str:
         start = content.find("[")
@@ -140,6 +384,8 @@ def debug_translation_request(
     timeout_seconds: int,
     target_language: str,
     texts: list[str],
+    content_type: str = "general",
+    custom_prompt: str = "",
 ) -> dict[str, Any]:
     provider = OpenAICompatibleTranslationProvider(
         api_base_url=api_base_url,
@@ -147,18 +393,16 @@ def debug_translation_request(
         model=model,
         timeout_seconds=timeout_seconds,
     )
-    prompt = provider._build_prompt(target_language)
-    response = provider.client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
-        ],
+    chunk = TranslationChunk(
+        start_index=0,
+        context_before=[],
+        main_segments=[ChunkLine(index=index, text=text) for index, text in enumerate(texts)],
+        context_after=[],
+        use_sections=False,
     )
-    content = response.choices[0].message.content
-    if not isinstance(content, str):
-        raise PipelineError("真实翻译 provider 未返回文本内容")
-    parsed = provider._parse_json_array_content(content)
+    prompt = provider._build_prompt(target_language, content_type, custom_prompt)
+    content = provider._request_translation(prompt, build_chunk_user_message(chunk))
+    parsed = parse_chunk_output(content, [line.index for line in chunk.main_segments], texts, provider._parse_json_array_content)
     return {
         "base_url": provider._resolve_base_url(),
         "model": model,
@@ -353,19 +597,39 @@ def get_translation_provider(config_snapshot: dict[str, Any]) -> TranslationProv
     )
 
 
-def translate_segments(context: TaskContext, segments: list[dict[str, Any]]) -> dict[str, list[str]]:
+def translate_segments(
+    context: TaskContext,
+    segments: list[dict[str, Any]],
+    progress_callback=None,
+) -> dict[str, list[str]]:
     translation_config = context.config_snapshot["translation"]
     if not translation_config["enabled"]:
         return {}
     provider = get_translation_provider(context.config_snapshot)
-    source_texts = [segment["text"] for segment in segments]
     translations: dict[str, list[str]] = {}
     max_retries = max(int(translation_config["max_retries"]), 1)
-    for language in translation_config["target_languages"]:
+    target_languages = [str(language) for language in translation_config["target_languages"]]
+    chunks = build_chunks(segments, CHUNK_SIZE, CONTEXT_SIZE)
+    total_chunks = len(chunks) * len(target_languages)
+    completed_chunks = 0
+    progress_lock = threading.Lock()
+    content_type = str(translation_config.get("content_type", "general") or "general")
+    custom_prompt = str(translation_config.get("custom_prompt", "") or "")
+
+    def on_chunk_complete() -> None:
+        nonlocal completed_chunks
+        if progress_callback is None or total_chunks <= 0:
+            return
+        with progress_lock:
+            completed_chunks += 1
+            progress_callback(completed_chunks, total_chunks)
+
+    translator = ChunkedTranslator(provider, content_type, custom_prompt, on_chunk_complete)
+    for language in target_languages:
         last_error: Exception | None = None
         for _ in range(max_retries):
             try:
-                translations[language] = provider.translate_batch(source_texts, language)
+                translations[language] = translator.translate_language(segments, language)
                 last_error = None
                 break
             except Exception as exc:

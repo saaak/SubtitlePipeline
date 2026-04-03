@@ -18,7 +18,17 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.model_manager import ModelManager
-from app.pipeline import TaskContext, debug_translation_request, translate_segments
+from app.pipeline import (
+    FORMAT_INSTRUCTION,
+    TRANSLATION_PRESETS,
+    TaskContext,
+    build_chunk_user_message,
+    build_chunks,
+    debug_translation_request,
+    parse_chunk_output,
+    parse_numbered_lines,
+    translate_segments,
+)
 from app.runtime import ScannerService, WorkerService
 from app.store import Database
 
@@ -269,6 +279,52 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertEqual(restarted["stage"], "queued")
             self.assertFalse(intermediates_dir.exists())
 
+    @patch("app.pipeline.OpenAI")
+    def test_worker_failure_keeps_failed_stage_and_logs_newest_first(self, mock_openai: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("translation down")
+        mock_openai.return_value = mock_client
+        self.database.update_config(
+            {
+                "translation": {
+                    "enabled": True,
+                    "target_languages": ["zh-CN"],
+                    "max_retries": 1,
+                    "api_base_url": "https://api.openai.com",
+                    "api_key": "test-key",
+                    "model": "gpt-4o-mini",
+                },
+                "processing": {
+                    "max_retries": 0,
+                },
+            }
+        )
+        self._create_installed_model("small")
+        video_path = self.data_dir / "translate_fail.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        scanner = ScannerService(self.database)
+        scanner.scan_once()
+        scanner.scan_once()
+
+        with patch.dict(sys.modules, {"whisperx": self._fake_whisperx()}, clear=False):
+            with patch("app.pipeline.shutil.which", return_value="ffmpeg"), patch("app.pipeline.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                worker = WorkerService(self.database)
+                self.assertTrue(worker.process_next_task())
+
+        task = self.database.list_tasks(page=1, page_size=10).items[0]
+        failed_task = self.database.get_task(task["id"])
+        self.assertIsNotNone(failed_task)
+        assert failed_task is not None
+        self.assertEqual(failed_task["status"], "failed")
+        self.assertEqual(failed_task["stage"], "translate")
+
+        logs = self.database.get_logs(task["id"], page=1, page_size=20).items
+        self.assertGreaterEqual(len(logs), 2)
+        self.assertEqual(logs[0]["stage"], "translate")
+        self.assertIn("translation down", logs[0]["message"])
+        self.assertGreaterEqual(logs[0]["timestamp"], logs[1]["timestamp"])
+
     def test_scan_stability_and_end_to_end_output(self) -> None:
         self._create_installed_model("small")
         video_path = self.data_dir / "demo_video.mp4"
@@ -374,6 +430,136 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIsNotNone(frozen_task)
         assert frozen_task is not None
         self.assertEqual(frozen_task["config_snapshot"]["translation"]["target_languages"], ["zh-CN"])
+
+    def test_build_chunks_and_boundaries(self) -> None:
+        segments = [{"start": float(index), "end": float(index + 1), "text": f"line {index}"} for index in range(120)]
+        chunks = build_chunks(segments, chunk_size=50, context_size=10)
+
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([line.index for line in chunks[0].context_before], [])
+        self.assertEqual([line.index for line in chunks[0].main_segments[:2]], [0, 1])
+        self.assertEqual([line.index for line in chunks[0].context_after], list(range(50, 60)))
+        self.assertEqual([line.index for line in chunks[1].context_before], list(range(40, 50)))
+        self.assertEqual([line.index for line in chunks[1].main_segments[:2]], [50, 51])
+        self.assertEqual([line.index for line in chunks[1].context_after], list(range(100, 110)))
+        self.assertEqual([line.index for line in chunks[2].context_before], list(range(90, 100)))
+        self.assertEqual([line.index for line in chunks[2].main_segments[-2:]], [118, 119])
+        self.assertEqual([line.index for line in chunks[2].context_after], [])
+        self.assertTrue(chunks[0].use_sections)
+
+        single = build_chunks(segments[:20], chunk_size=50, context_size=10)
+        self.assertEqual(len(single), 1)
+        self.assertFalse(single[0].use_sections)
+
+    def test_build_chunk_user_message(self) -> None:
+        segments = [{"start": float(index), "end": float(index + 1), "text": f"line {index}"} for index in range(55)]
+        chunk = build_chunks(segments, chunk_size=50, context_size=2)[0]
+        message = build_chunk_user_message(chunk)
+        self.assertIn("[翻译]", message)
+        self.assertIn("[下文]", message)
+        self.assertIn("0|line 0", message)
+        self.assertIn("50|line 50", message)
+
+        single_chunk = build_chunks(segments[:3], chunk_size=50, context_size=2)[0]
+        single_message = build_chunk_user_message(single_chunk)
+        self.assertNotIn("[翻译]", single_message)
+        self.assertEqual(single_message, "0|line 0\n1|line 1\n2|line 2")
+
+    def test_parse_numbered_lines(self) -> None:
+        self.assertEqual(
+            parse_numbered_lines("0|你好\n1|世界", [0, 1]),
+            ["你好", "世界"],
+        )
+        self.assertEqual(
+            parse_numbered_lines("0|你好\n2|忽略\n3|也忽略\n4|再忽略\n5|再忽略", [0, 1, 2, 3, 4], ["a", "b", "c", "d", "e"]),
+            ["你好", "b", "忽略", "也忽略", "再忽略"],
+        )
+        self.assertIsNone(parse_numbered_lines("0|你好", [0, 1, 2], ["a", "b", "c"]))
+
+    def test_parse_chunk_output_fallbacks(self) -> None:
+        self.assertEqual(
+            parse_chunk_output("0|你好\n1|世界", [0, 1], ["hello", "world"]),
+            ["你好", "世界"],
+        )
+        self.assertEqual(
+            parse_chunk_output('["你好", "世界"]', [0, 1], ["hello", "world"], lambda content: json.loads(content)),
+            ["你好", "世界"],
+        )
+        self.assertEqual(
+            parse_chunk_output("你好\n世界", [0, 1], ["hello", "world"]),
+            ["你好", "世界"],
+        )
+
+    @patch("app.pipeline.OpenAI")
+    def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:
+        mock_openai.return_value = MagicMock()
+        from app.pipeline import OpenAICompatibleTranslationProvider
+
+        provider = OpenAICompatibleTranslationProvider(
+            api_base_url="https://api.openai.com",
+            api_key="test-key",
+            model="gpt-4o-mini",
+            timeout_seconds=30,
+        )
+        movie_prompt = provider._build_prompt("zh-CN", "movie", "")
+        custom_prompt = provider._build_prompt("zh-CN", "movie", "custom style")
+
+        self.assertIn(TRANSLATION_PRESETS["movie"], movie_prompt)
+        self.assertIn(FORMAT_INSTRUCTION.format(target_language="zh-CN"), movie_prompt)
+        self.assertIn("custom style", custom_prompt)
+        self.assertNotIn(TRANSLATION_PRESETS["movie"], custom_prompt)
+
+    @patch("app.pipeline.OpenAI")
+    def test_translate_segments_chunked_flow(self, mock_openai: MagicMock) -> None:
+        def fake_create(*args, **kwargs):
+            user_content = kwargs["messages"][1]["content"]
+            translate_section = user_content.split("[翻译]\n", 1)[1] if "[翻译]\n" in user_content else user_content
+            translate_section = translate_section.split("\n\n[下文]", 1)[0]
+            lines = [line for line in translate_section.splitlines() if line.strip()]
+            content = "\n".join(
+                f"{prefix}|ZH-{text}"
+                for prefix, text in (line.split("|", 1) for line in lines)
+            )
+            return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = fake_create
+        mock_openai.return_value = mock_client
+
+        snapshot = self.database.get_config()
+        snapshot["translation"].update(
+            {
+                "enabled": True,
+                "api_key": "test-key",
+                "content_type": "movie",
+                "custom_prompt": "",
+                "target_languages": ["zh-CN"],
+                "max_retries": 1,
+            }
+        )
+        context = TaskContext(
+            task_id=1,
+            file_path=str(self.data_dir / "provider_demo.mp4"),
+            config_snapshot=snapshot,
+            work_dir=self.config_dir / "work" / "provider",
+        )
+        segments = [
+            {"start": float(index), "end": float(index + 1), "text": f"line {index}"}
+            for index in range(60)
+        ]
+        progress_events: list[tuple[int, int]] = []
+
+        translations = translate_segments(
+            context,
+            segments,
+            progress_callback=lambda current, total: progress_events.append((current, total)),
+        )
+
+        self.assertEqual(len(translations["zh-CN"]), 60)
+        self.assertEqual(translations["zh-CN"][0], "ZH-line 0")
+        self.assertEqual(translations["zh-CN"][-1], "ZH-line 59")
+        self.assertEqual(progress_events[-1], (2, 2))
+        self.assertEqual(mock_client.chat.completions.create.call_count, 2)
 
     @patch("app.pipeline.OpenAI")
     def test_openai_compatible_translation_provider(self, mock_openai: MagicMock) -> None:

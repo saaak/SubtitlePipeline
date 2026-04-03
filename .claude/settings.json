@@ -6,6 +6,9 @@
       "Bash(openspec status:*)",
       "Bash(mkdir -p openspec/changes/archive)",
       "Bash(mv openspec/changes/build-local-subtitle-pipeline-mvp openspec/changes/archive/2026-04-02-build-local-subtitle-pipeline-mvp)"
+    ],
+    "additionalDirectories": [
+      "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"
     ]
   }
 }

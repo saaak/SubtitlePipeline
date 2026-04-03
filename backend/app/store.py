@@ -352,7 +352,7 @@ class Database:
                 SELECT id, task_id, stage, level, message, details_json, timestamp
                 FROM task_logs
                 WHERE task_id = ?
-                ORDER BY timestamp ASC, id ASC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
                 (task_id, page_size, offset),
