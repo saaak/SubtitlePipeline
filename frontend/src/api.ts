@@ -11,6 +11,7 @@ export type Task = {
   error_message?: string | null
   result_payload?: {
     subtitle_paths?: string[]
+    mux_path?: string
   } | null
   config_snapshot?: Record<string, unknown> | null
   created_at: string
@@ -49,10 +50,11 @@ export type AppConfig = {
     scan_interval_seconds: number
     min_size_mb: number
     max_size_mb: number
-    in_place: boolean
   }
   processing: {
     max_retries: number
+    retry_mode: 'restart' | 'resume'
+    keep_intermediates: boolean
     poll_interval_seconds: number
     work_dir: string
   }
@@ -78,6 +80,11 @@ export type AppConfig = {
     filename_template: string
     source_language: string
     text_process_style: string
+  }
+  mux: {
+    enabled: boolean
+    output_dir: string
+    filename_template: string
   }
   logging: {
     page_size: number
@@ -128,18 +135,32 @@ export type TranslationTestResponse = {
   message: string
 }
 
+export type RetryMode = 'restart' | 'resume'
+
+export type ResumeCheckResponse = {
+  can_resume: boolean
+  missing: string[]
+}
+
+export type BrowseDirectoryResponse = {
+  current: string
+  parent?: string | null
+  dirs: string[]
+}
+
 export const defaultAppConfig: AppConfig = {
   file: {
     input_dir: '/data',
-    output_dir: '/output',
+    output_dir: '',
     allowed_extensions: ['.mp4', '.mkv', '.mov', '.avi'],
     scan_interval_seconds: 5,
     min_size_mb: 1,
     max_size_mb: 4096,
-    in_place: false,
   },
   processing: {
     max_retries: 1,
+    retry_mode: 'restart',
+    keep_intermediates: false,
     poll_interval_seconds: 2,
     work_dir: '/config/work',
   },
@@ -165,6 +186,11 @@ export const defaultAppConfig: AppConfig = {
     filename_template: '{stem}.{lang}.srt',
     source_language: 'auto',
     text_process_style: 'basic',
+  },
+  mux: {
+    enabled: false,
+    output_dir: '',
+    filename_template: '{stem}.subbed.mkv',
   },
   logging: {
     page_size: 50,
@@ -219,8 +245,11 @@ export function getTaskLogs(taskId: string, page: number): Promise<LogResponse> 
   return request<LogResponse>(`/api/tasks/${taskId}/logs?page=${page}&page_size=20`)
 }
 
-export function retryTask(taskId: number): Promise<void> {
-  return request<void>(`/api/tasks/${taskId}/retry`, { method: 'POST' })
+export function retryTask(taskId: number, mode: RetryMode): Promise<void> {
+  return request<void>(`/api/tasks/${taskId}/retry`, {
+    method: 'POST',
+    body: JSON.stringify({ mode }),
+  })
 }
 
 export function cancelTask(taskId: number): Promise<void> {
@@ -236,6 +265,15 @@ export function updateConfig(config: Partial<AppConfig>): Promise<AppConfig> {
     method: 'PUT',
     body: JSON.stringify(config),
   })
+}
+
+export function browseDirectory(path?: string): Promise<BrowseDirectoryResponse> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return request<BrowseDirectoryResponse>(`/api/browse${query}`)
+}
+
+export function checkResumeFeasibility(taskId: number): Promise<ResumeCheckResponse> {
+  return request<ResumeCheckResponse>(`/api/tasks/${taskId}/resume-check`)
 }
 
 export function getSystemStatus(): Promise<SystemStatus> {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -35,7 +36,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             path.mkdir(parents=True, exist_ok=True)
         (self.frontend_dist / "index.html").write_text("<!doctype html><title>SubPipeline</title>", encoding="utf-8")
 
-        self.database = Database(str(self.config_dir / "subpipeline.db"))
+        self.database = Database(str(self.config_dir / "api.db"))
         self.database.initialize()
         self.database.update_config(
             {
@@ -69,10 +70,12 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             "SUBPIPELINE_DB_PATH": os.environ.get("SUBPIPELINE_DB_PATH"),
             "SUBPIPELINE_FRONTEND_DIST": os.environ.get("SUBPIPELINE_FRONTEND_DIST"),
             "SUBPIPELINE_MODELS_DIR": os.environ.get("SUBPIPELINE_MODELS_DIR"),
+            "SUBPIPELINE_BROWSE_ROOTS": os.environ.get("SUBPIPELINE_BROWSE_ROOTS"),
         }
         os.environ["SUBPIPELINE_DB_PATH"] = str(self.config_dir / "api.db")
         os.environ["SUBPIPELINE_FRONTEND_DIST"] = str(self.frontend_dist)
         os.environ["SUBPIPELINE_MODELS_DIR"] = str(self.models_dir)
+        os.environ["SUBPIPELINE_BROWSE_ROOTS"] = ",".join([str(self.data_dir), str(self.output_dir), str(self.config_dir)])
 
     def tearDown(self) -> None:
         for key, value in self.previous_env.items():
@@ -112,10 +115,21 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
                 VALUES ('translation', 'provider', '"mock"', 'system', 0, 'now')
                 """
             )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('file', 'in_place', 'true', 'runtime', 0, 'now')
+                """
+            )
         self.database.initialize()
         config = self.database.get_config()
         self.assertNotIn("provider", config["translation"])
         self.assertNotIn("backend_mode", config["processing"])
+        self.assertNotIn("in_place", config["file"])
+        self.assertEqual(config["file"]["output_dir"], "")
+        self.assertEqual(config["processing"]["retry_mode"], "restart")
+        self.assertFalse(config["processing"]["keep_intermediates"])
+        self.assertIn("mux", config)
 
         status = self.database.get_system_status()
         self.assertFalse(status["setup_complete"])
@@ -154,6 +168,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             config_response = client.get("/api/config")
             self.assertEqual(config_response.status_code, 200)
             self.assertNotIn("provider", config_response.json()["translation"])
+            self.assertIn("mux", config_response.json())
 
             status_response = client.get("/api/system/status")
             self.assertEqual(status_response.status_code, 200)
@@ -185,6 +200,74 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             activate_response = client.post("/api/models/small/activate")
             self.assertEqual(activate_response.status_code, 200)
             self.assertEqual(activate_response.json()["config"]["whisper"]["model_name"], "small")
+
+            browse_response = client.get("/api/browse", params={"path": str(self.data_dir)})
+            self.assertEqual(browse_response.status_code, 200)
+            self.assertEqual(browse_response.json()["current"], str(self.data_dir.resolve()))
+
+    def test_resume_retry_modes_and_resume_check(self) -> None:
+        video_path = self.data_dir / "resume_demo.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
+        task = self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
+        snapshot = self.database.get_config()
+        snapshot["translation"]["enabled"] = False
+        snapshot_json = json.dumps(
+            {
+                group_name: group_values
+                for group_name, group_values in snapshot.items()
+                if group_name in {"file", "processing", "whisper", "translation", "subtitle", "mux"}
+            }
+        )
+        intermediates_dir = video_path.parent / ".subpipeline" / video_path.stem
+        intermediates_dir.mkdir(parents=True, exist_ok=True)
+        (intermediates_dir / "audio.wav").write_bytes(b"audio")
+        (intermediates_dir / "asr_result.json").write_text(json.dumps({"segments": [{"start": 0, "end": 1, "text": "hello"}]}), encoding="utf-8")
+        (intermediates_dir / "processed_segments.json").write_text(
+            json.dumps([{"start": 0, "end": 1, "text": "hello."}]),
+            encoding="utf-8",
+        )
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed', stage = 'translate', progress = 80, config_snapshot = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (snapshot_json, "now", task["id"]),
+            )
+
+        app = create_app()
+        with TestClient(app) as client:
+            resume_check = client.get(f"/api/tasks/{task['id']}/resume-check")
+            self.assertEqual(resume_check.status_code, 200)
+            self.assertTrue(resume_check.json()["can_resume"])
+
+            resume_retry = client.post(f"/api/tasks/{task['id']}/retry", json={"mode": "resume"})
+            self.assertEqual(resume_retry.status_code, 200)
+            resumed = self.database.get_task(task["id"])
+            self.assertIsNotNone(resumed)
+            assert resumed is not None
+            self.assertEqual(resumed["status"], "pending")
+            self.assertEqual(resumed["stage"], "translate")
+
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'failed', stage = 'translate', progress = 80, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    ("later", task["id"]),
+                )
+
+            restart_retry = client.post(f"/api/tasks/{task['id']}/retry", json={"mode": "restart"})
+            self.assertEqual(restart_retry.status_code, 200)
+            restarted = self.database.get_task(task["id"])
+            self.assertIsNotNone(restarted)
+            assert restarted is not None
+            self.assertEqual(restarted["stage"], "queued")
+            self.assertFalse(intermediates_dir.exists())
 
     def test_scan_stability_and_end_to_end_output(self) -> None:
         self._create_installed_model("small")

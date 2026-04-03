@@ -320,6 +320,54 @@ select {
   gap: 8px;
 }
 
+.directory-picker,
+.directory-browser-toolbar,
+.directory-browser-list,
+.task-detail-actions {
+  display: grid;
+  gap: 12px;
+}
+
+.directory-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 1000;
+}
+
+.dialog-card {
+  width: min(720px, 100%);
+  max-height: min(80vh, 720px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 20px;
+  padding: 24px;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.2);
+  display: grid;
+  gap: 16px;
+}
+
+.directory-entry {
+  text-align: left;
+  background: #f8fbff;
+  color: #1e293b;
+  border: 1px solid #dbeafe;
+}
+
+.directory-entry:hover:not(:disabled) {
+  background: #eff6ff;
+}
+
 .progress-bar {
   width: 180px;
   height: 10px;

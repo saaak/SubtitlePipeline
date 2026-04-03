@@ -11,8 +11,9 @@ import {
   testTranslation,
   updateConfig,
 } from '../api'
+import { DirectoryPicker } from '../components/DirectoryPicker'
 
-type GroupName = 'file' | 'processing' | 'whisper' | 'translation' | 'subtitle' | 'logging'
+type GroupName = 'file' | 'processing' | 'whisper' | 'translation' | 'subtitle' | 'mux' | 'logging'
 
 function TagEditor({
   label,
@@ -168,6 +169,7 @@ export function SettingsPage() {
         whisper: config.whisper,
         translation: config.translation,
         subtitle: config.subtitle,
+        mux: config.mux,
         logging: config.logging,
       })
       setConfig(updated)
@@ -242,14 +244,18 @@ export function SettingsPage() {
         <div className="card">
           <h2>文件扫描</h2>
           <div className="field-grid">
-            <label>
-              <span>输入目录</span>
-              <input value={config.file.input_dir} onChange={(event) => setField('file', 'input_dir', event.target.value)} />
-            </label>
-            <label>
-              <span>输出目录</span>
-              <input value={config.file.output_dir} onChange={(event) => setField('file', 'output_dir', event.target.value)} />
-            </label>
+            <DirectoryPicker
+              label="输入目录"
+              value={config.file.input_dir}
+              onChange={(value) => setField('file', 'input_dir', value)}
+              placeholder="例如 /data"
+            />
+            <DirectoryPicker
+              label="输出目录"
+              value={config.file.output_dir}
+              onChange={(value) => setField('file', 'output_dir', value)}
+              placeholder="留空则输出到源文件目录"
+            />
             <label>
               <span>扫描间隔（秒）</span>
               <input
@@ -265,10 +271,6 @@ export function SettingsPage() {
             <label>
               <span>最大文件（MB）</span>
               <input type="number" value={config.file.max_size_mb} onChange={(event) => setField('file', 'max_size_mb', Number(event.target.value))} />
-            </label>
-            <label className="switch-row">
-              <span>原目录输出</span>
-              <input type="checkbox" checked={config.file.in_place} onChange={(event) => setField('file', 'in_place', event.target.checked)} />
             </label>
           </div>
           <TagEditor
@@ -410,6 +412,33 @@ export function SettingsPage() {
             </label>
           </div>
         </div>
+
+        <div className="card">
+          <div className="card-header">
+            <h2>字幕压片</h2>
+            <label className="switch-row">
+              <span>启用压片</span>
+              <input type="checkbox" checked={config.mux.enabled} onChange={(event) => setField('mux', 'enabled', event.target.checked)} />
+            </label>
+          </div>
+          <div className={`field-grid ${config.mux.enabled ? '' : 'disabled-section'}`}>
+            <DirectoryPicker
+              label="压片输出目录"
+              value={config.mux.output_dir}
+              onChange={(value) => setField('mux', 'output_dir', value)}
+              placeholder="留空则输出到源文件目录"
+              disabled={!config.mux.enabled}
+            />
+            <label>
+              <span>压片文件名模板</span>
+              <input
+                disabled={!config.mux.enabled}
+                value={config.mux.filename_template}
+                onChange={(event) => setField('mux', 'filename_template', event.target.value)}
+              />
+            </label>
+          </div>
+        </div>
       </div>
 
       <div className="card">
@@ -427,11 +456,26 @@ export function SettingsPage() {
               <input type="number" value={config.processing.max_retries} onChange={(event) => setField('processing', 'max_retries', Number(event.target.value))} />
             </label>
             <label>
+              <span>自动重试模式</span>
+              <select value={config.processing.retry_mode} onChange={(event) => setField('processing', 'retry_mode', event.target.value as AppConfig['processing']['retry_mode'])}>
+                <option value="restart">restart</option>
+                <option value="resume">resume</option>
+              </select>
+            </label>
+            <label>
               <span>轮询间隔（秒）</span>
               <input
                 type="number"
                 value={config.processing.poll_interval_seconds}
                 onChange={(event) => setField('processing', 'poll_interval_seconds', Number(event.target.value))}
+              />
+            </label>
+            <label className="switch-row">
+              <span>保留中间产物</span>
+              <input
+                type="checkbox"
+                checked={config.processing.keep_intermediates}
+                onChange={(event) => setField('processing', 'keep_intermediates', event.target.checked)}
               />
             </label>
             <label>

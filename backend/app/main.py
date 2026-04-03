@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .model_manager import ModelManager
-from .pipeline import PipelineError, get_translation_provider
+from .pipeline import PipelineError, check_resume_feasibility, get_translation_provider
 from .runtime import ScannerService, WorkerService
 from .store import Database
 
@@ -23,7 +23,12 @@ class ConfigUpdateRequest(BaseModel):
     whisper: dict[str, Any] | None = None
     translation: dict[str, Any] | None = None
     subtitle: dict[str, Any] | None = None
+    mux: dict[str, Any] | None = None
     logging: dict[str, Any] | None = None
+
+
+class RetryRequest(BaseModel):
+    mode: Literal["restart", "resume"] = "restart"
 
 
 class TaskActionResponse(BaseModel):
@@ -63,6 +68,41 @@ def resolve_frontend_dist() -> Path:
 
 def resolve_models_dir() -> str:
     return os.environ.get("SUBPIPELINE_MODELS_DIR", "/models")
+
+
+def resolve_browse_roots() -> list[Path]:
+    roots = [Path("/data"), Path("/output"), Path("/config")]
+    extra = os.environ.get("SUBPIPELINE_BROWSE_ROOTS", "")
+    for value in extra.split(","):
+        stripped = value.strip()
+        if stripped:
+            roots.append(Path(stripped))
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        candidate = root.expanduser().resolve()
+        key = str(candidate).lower()
+        if key not in seen:
+            seen.add(key)
+            resolved.append(candidate)
+    return resolved
+
+
+def is_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_browse_target(raw_path: str | None) -> tuple[Path, list[Path]]:
+    roots = resolve_browse_roots()
+    requested = roots[0] if not raw_path or not raw_path.strip() else Path(raw_path).expanduser().resolve()
+    for root in roots:
+        if is_within_root(requested, root):
+            return requested, roots
+    raise HTTPException(status_code=403, detail="请求路径不在允许浏览的目录范围内")
 
 
 @asynccontextmanager
@@ -134,9 +174,12 @@ def create_app() -> FastAPI:
         )
 
     @app.post("/api/tasks/{task_id}/retry", response_model=TaskActionResponse)
-    def retry_task(task_id: int) -> TaskActionResponse:
+    def retry_task(task_id: int, request: RetryRequest) -> TaskActionResponse:
         database = get_database(app)
-        task = database.request_retry(task_id)
+        try:
+            task = database.request_retry(task_id, request.mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not task:
             raise HTTPException(status_code=404, detail="task not found or not retryable")
         return TaskActionResponse(
@@ -146,6 +189,14 @@ def create_app() -> FastAPI:
             progress=task["progress"],
             cancel_requested=bool(task["cancel_requested"]),
         )
+
+    @app.get("/api/tasks/{task_id}/resume-check")
+    def get_resume_check(task_id: int) -> dict[str, Any]:
+        database = get_database(app)
+        task = database.get_task(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="task not found")
+        return check_resume_feasibility(task)
 
     @app.get("/api/tasks/{task_id}/logs")
     def get_task_logs(
@@ -178,6 +229,21 @@ def create_app() -> FastAPI:
             return database.update_config(payload)
         except KeyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/browse")
+    def browse_directory(path: str | None = Query(None)) -> dict[str, Any]:
+        target_path, roots = resolve_browse_target(path)
+        if not target_path.exists():
+            raise HTTPException(status_code=404, detail="目录不存在")
+        if not target_path.is_dir():
+            raise HTTPException(status_code=400, detail="请求路径不是目录")
+        parent = target_path.parent if any(is_within_root(target_path.parent, root) for root in roots) else None
+        dirs = sorted(item.name for item in target_path.iterdir() if item.is_dir())
+        return {
+            "current": str(target_path),
+            "parent": str(parent) if parent is not None else None,
+            "dirs": dirs,
+        }
 
     @app.get("/api/system/status")
     def get_system_status() -> dict[str, Any]:

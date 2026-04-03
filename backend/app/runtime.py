@@ -5,8 +5,31 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .pipeline import CancellationRequested, PipelineError, TaskContext, extract_audio, process_text_segments, render_srt, run_asr, translate_segments, write_stage_artifacts
-from .store import Database, normalize_path
+from .pipeline import (
+    CancellationRequested,
+    PipelineError,
+    TaskContext,
+    build_result_payload,
+    cleanup_intermediates,
+    cleanup_work_dir_intermediates,
+    ensure_intermediates_dir,
+    extract_audio,
+    load_asr_result,
+    load_processed_segments,
+    read_stage_artifacts,
+    load_translations,
+    mux_subtitle,
+    process_text_segments,
+    render_srt,
+    resolve_audio_path,
+    run_asr,
+    save_asr_result,
+    save_processed_segments,
+    save_translations,
+    translate_segments,
+    write_stage_artifacts,
+)
+from .store import Database
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".m4v"}
@@ -36,6 +59,8 @@ class ScannerService:
         skipped = 0
         for path in input_dir.rglob("*"):
             if not path.is_file():
+                continue
+            if ".subpipeline" in path.parts:
                 continue
             if path.suffix.lower() not in allowed:
                 continue
@@ -110,34 +135,87 @@ class WorkerService:
             config_snapshot=snapshot,
             work_dir=work_dir,
         )
-        audio_path = self._run_stage(task["id"], "extract_audio", 10, lambda: extract_audio(context))
-        asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path))
-        processed_segments = self._run_stage(
-            task["id"],
-            "text_process",
-            55,
-            lambda: process_text_segments(asr_result["segments"]),
-        )
-        translations = self._run_stage(
-            task["id"],
-            "translate",
-            80,
-            lambda: translate_segments(context, processed_segments),
-        )
-        subtitle_paths = self._run_stage(
-            task["id"],
-            "subtitle_render",
-            95,
-            lambda: render_srt(context, processed_segments, translations),
-        )
-        result_payload = {
-            "audio_path": str(audio_path),
-            "subtitle_paths": subtitle_paths,
-            "device": snapshot["whisper"]["device"],
-            "translations": list(translations.keys()),
-            "file_path_key": normalize_path(task["file_path"]),
-        }
-        self._run_stage(task["id"], "output_finalize", 100, lambda: write_stage_artifacts(context, result_payload))
+        intermediates_dir = ensure_intermediates_dir(context)
+        if context.using_fallback_intermediates:
+            self.database.log(
+                task["id"],
+                task["stage"],
+                "WARNING",
+                "源文件目录不可写，已回退到工作目录保存中间产物",
+                {"intermediates_dir": str(intermediates_dir)},
+            )
+        start_stage = str(task["stage"])
+        audio_path: Path | None = None
+        asr_result: dict[str, Any] | None = None
+        processed_segments: list[dict[str, Any]] | None = None
+        translations: dict[str, list[str]] | None = None
+        subtitle_paths: list[str] | None = None
+        result_payload: dict[str, Any] | None = None
+        if start_stage not in {"queued", "extract_audio"}:
+            audio_path = resolve_audio_path(context)
+        if start_stage in {"text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
+            asr_result = load_asr_result(context)
+        if start_stage in {"translate", "subtitle_render", "output_finalize", "mux"}:
+            processed_segments = load_processed_segments(context)
+        if snapshot["translation"]["enabled"] and start_stage in {"subtitle_render", "output_finalize", "mux"}:
+            translations = load_translations(context)
+        if start_stage in {"output_finalize", "mux"}:
+            if processed_segments is None:
+                raise PipelineError("缺少字幕渲染依赖，无法继续执行")
+            subtitle_paths = render_srt(context, processed_segments, translations or {})
+        if start_stage == "mux":
+            result_payload = read_stage_artifacts(context)
+        if start_stage in {"queued", "extract_audio"}:
+            audio_path = self._run_stage(task["id"], "extract_audio", 10, lambda: extract_audio(context))
+        if start_stage in {"queued", "extract_audio", "asr"}:
+            if audio_path is None:
+                raise PipelineError("缺少音频文件，无法执行 ASR")
+            asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path))
+            save_asr_result(context, asr_result)
+        if start_stage in {"queued", "extract_audio", "asr", "text_process"}:
+            if asr_result is None:
+                raise PipelineError("缺少 ASR 结果，无法继续执行")
+            processed_segments = self._run_stage(
+                task["id"],
+                "text_process",
+                55,
+                lambda: process_text_segments(asr_result["segments"]),
+            )
+            save_processed_segments(context, processed_segments)
+        if start_stage in {"queued", "extract_audio", "asr", "text_process", "translate"}:
+            if processed_segments is None:
+                raise PipelineError("缺少分段结果，无法继续执行")
+            translations = self._run_stage(
+                task["id"],
+                "translate",
+                80,
+                lambda: translate_segments(context, processed_segments),
+            )
+            save_translations(context, translations)
+        if start_stage in {"queued", "extract_audio", "asr", "text_process", "translate", "subtitle_render"}:
+            if processed_segments is None:
+                raise PipelineError("缺少字幕渲染输入，无法继续执行")
+            subtitle_paths = self._run_stage(
+                task["id"],
+                "subtitle_render",
+                95,
+                lambda: render_srt(context, processed_segments, translations or {}),
+            )
+        if audio_path is None or subtitle_paths is None:
+            raise PipelineError("缺少最终输出所需产物")
+        if start_stage in {"queued", "extract_audio", "asr", "text_process", "translate", "subtitle_render", "output_finalize"}:
+            result_payload = build_result_payload(context, audio_path, subtitle_paths, translations or {})
+            self._run_stage(task["id"], "output_finalize", 100, lambda: write_stage_artifacts(context, result_payload))
+        if result_payload is None:
+            raise PipelineError("缺少任务结果元数据")
+        if snapshot["mux"]["enabled"]:
+            mux_path = self._run_stage(task["id"], "mux", 100, lambda: mux_subtitle(context, subtitle_paths))
+            result_payload["mux_path"] = mux_path
+            write_stage_artifacts(context, result_payload)
+        if not snapshot["processing"]["keep_intermediates"]:
+            cleanup_intermediates(Path(task["file_path"]))
+            if context.using_fallback_intermediates:
+                cleanup_work_dir_intermediates(context.work_dir)
         return result_payload
 
     def _run_stage(self, task_id: int, stage: str, progress: float, action):

@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config
+from .pipeline import check_resume_feasibility, cleanup_intermediates, cleanup_work_dir_intermediates
 
 
 OBSOLETE_CONFIG_FIELDS = {
+    ("file", "in_place"),
     ("processing", "backend_mode"),
     ("translation", "provider"),
     ("translation", "mock_prefix_template"),
@@ -119,6 +121,24 @@ class Database:
             )
             self._ensure_column(connection, "tasks", "source_size_bytes", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "tasks", "source_mtime", "REAL NOT NULL DEFAULT 0")
+            in_place_row = connection.execute(
+                """
+                SELECT value_json
+                FROM system_config
+                WHERE group_name = 'file' AND key_name = 'in_place'
+                """
+            ).fetchone()
+            if in_place_row and bool(json.loads(in_place_row["value_json"])):
+                connection.execute(
+                    """
+                    INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                    VALUES ('file', 'output_dir', '""', 'runtime', 0, ?)
+                    ON CONFLICT(group_name, key_name)
+                    DO UPDATE SET value_json = excluded.value_json,
+                                  updated_at = excluded.updated_at
+                    """,
+                    (utc_now(),),
+                )
             connection.execute(
                 """
                 UPDATE tasks
@@ -155,6 +175,19 @@ class Database:
                 """,
                 (now,),
             )
+
+    def _build_result_affecting_snapshot(self, config: dict[str, Any]) -> dict[str, Any]:
+        return {
+            group_name: group_values
+            for group_name, group_values in config.items()
+            if group_name in RESULT_AFFECTING_GROUPS
+        }
+
+    def _resolve_task_work_dir(self, task_id: int, config_snapshot: dict[str, Any] | None) -> Path:
+        if config_snapshot is not None:
+            return Path(config_snapshot["processing"]["work_dir"]) / str(task_id)
+        config = self.get_config()
+        return Path(config["processing"]["work_dir"]) / str(task_id)
 
     def _ensure_column(self, connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
         columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
@@ -354,22 +387,41 @@ class Database:
             )
         return self.get_task(task_id)
 
-    def request_retry(self, task_id: int) -> dict[str, Any] | None:
+    def request_retry(self, task_id: int, mode: str = "restart") -> dict[str, Any] | None:
+        if mode not in {"restart", "resume"}:
+            raise ValueError("不支持的重试模式")
+        task = self.get_task(task_id)
+        if not task or task["status"] not in {"failed", "cancelled", "done"}:
+            return None
+        if mode == "resume":
+            feasibility = check_resume_feasibility(task)
+            if not feasibility["can_resume"]:
+                missing = ", ".join(feasibility["missing"])
+                raise ValueError(f"中间文件缺失，无法继续执行: {missing}")
+        else:
+            cleanup_intermediates(Path(task["file_path"]))
+            cleanup_work_dir_intermediates(self._resolve_task_work_dir(task_id, task["config_snapshot"]))
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE tasks
                 SET status = 'pending',
-                    stage = 'queued',
-                    progress = 0,
+                    stage = ?,
+                    progress = ?,
                     cancel_requested = 0,
                     error_message = NULL,
+                    result_payload = NULL,
                     updated_at = ?,
                     started_at = NULL,
                     finished_at = NULL
                 WHERE id = ? AND status IN ('failed', 'cancelled', 'done')
                 """,
-                (utc_now(), task_id),
+                (
+                    "queued" if mode == "restart" else task["stage"],
+                    0 if mode == "restart" else float(task["progress"]),
+                    utc_now(),
+                    task_id,
+                ),
             )
         return self.get_task(task_id)
 
@@ -479,16 +531,12 @@ class Database:
 
     def claim_next_pending_task(self) -> dict[str, Any] | None:
         config = self.get_config()
-        snapshot = {
-            group_name: group_values
-            for group_name, group_values in config.items()
-            if group_name in RESULT_AFFECTING_GROUPS
-        }
+        snapshot = self._build_result_affecting_snapshot(config)
         now = utc_now()
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, file_path, retry_count, max_retries
+                SELECT id, file_path, retry_count, max_retries, stage, progress
                 FROM tasks
                 WHERE status = 'pending'
                 ORDER BY created_at ASC, id ASC
@@ -497,18 +545,26 @@ class Database:
             ).fetchone()
             if not row:
                 return None
+            start_stage = "extract_audio" if row["stage"] == "queued" else row["stage"]
             connection.execute(
                 """
                 UPDATE tasks
                 SET status = 'processing',
-                    stage = 'extract_audio',
-                    progress = 0,
+                    stage = ?,
+                    progress = ?,
                     config_snapshot = ?,
                     updated_at = ?,
                     started_at = COALESCE(started_at, ?)
                 WHERE id = ?
                 """,
-                (json.dumps(snapshot), now, now, row["id"]),
+                (
+                    start_stage,
+                    0 if row["stage"] == "queued" else float(row["progress"]),
+                    json.dumps(snapshot),
+                    now,
+                    now,
+                    row["id"],
+                ),
             )
             task_id = row["id"]
         self.log(task_id, "processing", "INFO", "任务开始处理", {"config_snapshot": snapshot})
@@ -529,13 +585,15 @@ class Database:
             )
 
     def mark_task_done(self, task_id: int, result_payload: dict[str, Any]) -> None:
+        task = self.get_task(task_id)
+        final_stage = "mux" if task and task["config_snapshot"] and task["config_snapshot"]["mux"]["enabled"] else "output_finalize"
         now = utc_now()
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE tasks
                 SET status = 'done',
-                    stage = 'output_finalize',
+                    stage = ?,
                     progress = 100,
                     result_payload = ?,
                     error_message = NULL,
@@ -543,9 +601,9 @@ class Database:
                     finished_at = ?
                 WHERE id = ?
                 """,
-                (json.dumps(result_payload), now, now, task_id),
+                (final_stage, json.dumps(result_payload), now, now, task_id),
             )
-        self.log(task_id, "output_finalize", "INFO", "任务处理完成", result_payload)
+        self.log(task_id, final_stage, "INFO", "任务处理完成", result_payload)
 
     def mark_task_cancelled(self, task_id: int, stage: str, message: str = "任务已取消") -> None:
         now = utc_now()
@@ -572,6 +630,18 @@ class Database:
         retry_count = int(task["retry_count"])
         max_retries = int(task["max_retries"])
         should_retry = retry_count < max_retries
+        retry_mode = "restart"
+        details: dict[str, Any] = {"will_retry": should_retry}
+        if should_retry and task["config_snapshot"]:
+            retry_mode = str(task["config_snapshot"]["processing"].get("retry_mode", "restart"))
+            if retry_mode == "resume":
+                feasibility = check_resume_feasibility(task)
+                if not feasibility["can_resume"]:
+                    retry_mode = "restart"
+                    details["resume_missing"] = feasibility["missing"]
+        if should_retry and retry_mode == "restart":
+            cleanup_intermediates(Path(task["file_path"]))
+            cleanup_work_dir_intermediates(self._resolve_task_work_dir(task_id, task["config_snapshot"]))
         now = utc_now()
         with self.connect() as connection:
             if should_retry:
@@ -579,14 +649,20 @@ class Database:
                     """
                     UPDATE tasks
                     SET status = 'pending',
-                        stage = 'queued',
-                        progress = 0,
+                        stage = ?,
+                        progress = ?,
                         retry_count = retry_count + 1,
                         error_message = ?,
                         updated_at = ?
                     WHERE id = ?
                     """,
-                    (message, now, task_id),
+                    (
+                        "queued" if retry_mode == "restart" else stage,
+                        0 if retry_mode == "restart" else float(task["progress"]),
+                        message,
+                        now,
+                        task_id,
+                    ),
                 )
             else:
                 connection.execute(
@@ -602,7 +678,8 @@ class Database:
                     (stage, message, now, now, task_id),
                 )
         level = "WARNING" if should_retry else "ERROR"
-        self.log(task_id, stage, level, message, {"will_retry": should_retry})
+        details["retry_mode"] = retry_mode
+        self.log(task_id, stage, level, message, details)
         updated = self.get_task(task_id)
         if updated is None:
             raise RuntimeError("failed to reload task after failure")

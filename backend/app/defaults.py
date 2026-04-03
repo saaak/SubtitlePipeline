@@ -5,15 +5,16 @@ from copy import deepcopy
 DEFAULT_CONFIG = {
     "file": {
         "input_dir": "/data",
-        "output_dir": "/output",
+        "output_dir": "",
         "allowed_extensions": [".mp4", ".mkv", ".mov", ".avi"],
         "scan_interval_seconds": 5,
         "min_size_mb": 1,
         "max_size_mb": 4096,
-        "in_place": False,
     },
     "processing": {
         "max_retries": 1,
+        "retry_mode": "restart",
+        "keep_intermediates": False,
         "poll_interval_seconds": 2,
         "work_dir": "/config/work",
     },
@@ -40,6 +41,11 @@ DEFAULT_CONFIG = {
         "source_language": "auto",
         "text_process_style": "basic",
     },
+    "mux": {
+        "enabled": False,
+        "output_dir": "",
+        "filename_template": "{stem}.subbed.mkv",
+    },
     "logging": {
         "page_size": 50,
         "level": "INFO",
@@ -52,7 +58,7 @@ SYSTEM_LEVEL_FIELDS = {
     ("whisper", "align_model"),
 }
 
-RESULT_AFFECTING_GROUPS = {"file", "processing", "whisper", "translation", "subtitle"}
+RESULT_AFFECTING_GROUPS = {"file", "processing", "whisper", "translation", "subtitle", "mux"}
 STAGE_SEQUENCE = [
     "extract_audio",
     "asr",
@@ -60,6 +66,7 @@ STAGE_SEQUENCE = [
     "translate",
     "subtitle_render",
     "output_finalize",
+    "mux",
 ]
 
 

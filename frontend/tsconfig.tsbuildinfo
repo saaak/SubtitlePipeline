@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/hooks.ts","./src/main.tsx","./src/pages/modelmanagerpage.tsx","./src/pages/settingspage.tsx","./src/pages/setupwizard.tsx","./src/pages/taskdetailpage.tsx","./src/pages/taskspage.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/hooks.ts","./src/main.tsx","./src/components/directorypicker.tsx","./src/pages/modelmanagerpage.tsx","./src/pages/settingspage.tsx","./src/pages/setupwizard.tsx","./src/pages/taskdetailpage.tsx","./src/pages/taskspage.tsx"],"version":"5.9.3"}

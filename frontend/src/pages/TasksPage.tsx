@@ -29,7 +29,7 @@ export function TasksPage() {
       if (type === 'cancel') {
         await cancelTask(taskId)
       } else {
-        await retryTask(taskId)
+        await retryTask(taskId, 'restart')
       }
       await load()
     } catch (err) {
