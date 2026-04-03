@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
+import openai
+from openai import OpenAI
 
 
 class PipelineError(RuntimeError):
@@ -38,50 +40,131 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.client = OpenAI(
+            api_key=self.api_key or "missing-api-key",
+            base_url=self._resolve_base_url(),
+            timeout=float(self.timeout_seconds),
+            max_retries=0,
+        )
 
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
+        if not texts:
+            return []
         if not self.api_key:
             raise PipelineError("translation.api_key 未配置，无法调用真实翻译 provider")
-        endpoint = (
-            f"{self.api_base_url}/chat/completions"
-            if self.api_base_url.endswith("/v1")
-            else f"{self.api_base_url}/v1/chat/completions"
-        )
-        prompt = (
-            f"Translate each input string to {target_language}. "
-            "Return a JSON array of translated strings only. "
-            "Keep the same order and array length. Do not include markdown."
-        )
-        response = httpx.post(
-            endpoint,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "messages": [
-                    {"role": "developer", "content": prompt},
+        prompt = self._build_prompt(target_language)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": prompt},
                     {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
                 ],
-            },
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        payload = response.json()
+            )
+        except openai.AuthenticationError as exc:
+            raise PipelineError("翻译服务鉴权失败，请检查 API Key") from exc
+        except openai.RateLimitError as exc:
+            raise PipelineError("翻译服务触发限流，请稍后重试") from exc
+        except openai.BadRequestError as exc:
+            raise PipelineError(f"翻译请求参数无效: {exc}") from exc
+        except openai.APIConnectionError as exc:
+            raise PipelineError("翻译服务连接失败，请检查 API 地址、网络或服务状态") from exc
+        except openai.APIStatusError as exc:
+            raise PipelineError(f"翻译服务返回异常状态 {exc.status_code}") from exc
+        except openai.APIError as exc:
+            raise PipelineError(f"翻译服务调用失败: {exc}") from exc
         try:
-            content = payload["choices"][0]["message"]["content"]
+            content = response.choices[0].message.content
         except (KeyError, IndexError, TypeError) as exc:
             raise PipelineError("真实翻译 provider 返回格式无效") from exc
         if not isinstance(content, str):
             raise PipelineError("真实翻译 provider 未返回文本内容")
-        try:
-            translated = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise PipelineError("真实翻译 provider 未返回 JSON 数组") from exc
+        translated = self._parse_json_array_content(content)
         if not isinstance(translated, list) or len(translated) != len(texts):
             raise PipelineError("真实翻译 provider 返回结果数量与输入不一致")
         return [str(item).strip() for item in translated]
+
+    def _resolve_base_url(self) -> str:
+        if self.api_base_url.endswith("/v1"):
+            return self.api_base_url
+        return f"{self.api_base_url}/v1"
+
+    def _build_prompt(self, target_language: str) -> str:
+        return (
+            f"Translate each input string to {target_language}. "
+            "Return a JSON array of translated strings only. "
+            "Keep the same order and array length. Do not include markdown or code fences."
+        )
+
+    def _parse_json_array_content(self, content: str) -> list[Any]:
+        candidates = [
+            content.strip(),
+            self._strip_code_fence(content),
+            self._extract_json_array(content),
+        ]
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                parsed = json.loads(normalized)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, list):
+                return parsed
+        raise PipelineError(f"真实翻译 provider 未返回 JSON 数组，原始响应: {content[:200]}")
+
+    def _strip_code_fence(self, content: str) -> str:
+        stripped = content.strip()
+        if stripped.startswith("```") and stripped.endswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", stripped)
+            stripped = re.sub(r"\s*```$", "", stripped)
+        return stripped.strip()
+
+    def _extract_json_array(self, content: str) -> str:
+        start = content.find("[")
+        end = content.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            return ""
+        return content[start : end + 1]
+
+
+def debug_translation_request(
+    api_base_url: str,
+    api_key: str,
+    model: str,
+    timeout_seconds: int,
+    target_language: str,
+    texts: list[str],
+) -> dict[str, Any]:
+    provider = OpenAICompatibleTranslationProvider(
+        api_base_url=api_base_url,
+        api_key=api_key,
+        model=model,
+        timeout_seconds=timeout_seconds,
+    )
+    prompt = provider._build_prompt(target_language)
+    response = provider.client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": json.dumps(texts, ensure_ascii=False)},
+        ],
+    )
+    content = response.choices[0].message.content
+    if not isinstance(content, str):
+        raise PipelineError("真实翻译 provider 未返回文本内容")
+    parsed = provider._parse_json_array_content(content)
+    return {
+        "base_url": provider._resolve_base_url(),
+        "model": model,
+        "target_language": target_language,
+        "texts": texts,
+        "raw_content": content,
+        "parsed": [str(item).strip() for item in parsed],
+    }
 
 
 def ensure_parent(path: Path) -> None:

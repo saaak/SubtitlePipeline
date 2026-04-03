@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.model_manager import ModelManager
-from app.pipeline import TaskContext, translate_segments
+from app.pipeline import TaskContext, debug_translation_request, translate_segments
 from app.runtime import ScannerService, WorkerService
 from app.store import Database
 
@@ -138,13 +138,14 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIn("huggingface.co/Systran/faster-whisper-tiny", item["manual_download_url"])
         self.assertIn("/models/tiny", item["error"])
 
-    @patch("app.pipeline.httpx.post")
-    def test_api_endpoints_cover_system_status_translation_and_models(self, mock_post: MagicMock) -> None:
+    @patch("app.pipeline.OpenAI")
+    def test_api_endpoints_cover_system_status_translation_and_models(self, mock_openai: MagicMock) -> None:
         self._create_installed_model("small")
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"choices": [{"message": {"content": '["测试成功"]'}}]}
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock(message=MagicMock(content='["测试成功"]'))]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_completion
+        mock_openai.return_value = mock_client
 
         app = create_app()
         with TestClient(app) as client:
@@ -244,9 +245,11 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(next_scan.queued, 1)
         self.assertEqual(len(self.database.list_tasks(page=1, page_size=10).items), 2)
 
-    @patch("app.pipeline.httpx.post")
-    def test_failed_translation_requeues_then_fails(self, mock_post: MagicMock) -> None:
-        mock_post.side_effect = RuntimeError("translation down")
+    @patch("app.pipeline.OpenAI")
+    def test_failed_translation_requeues_then_fails(self, mock_openai: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = RuntimeError("translation down")
+        mock_openai.return_value = mock_client
         self.database.update_config(
             {
                 "translation": {
@@ -289,20 +292,13 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         assert frozen_task is not None
         self.assertEqual(frozen_task["config_snapshot"]["translation"]["target_languages"], ["zh-CN"])
 
-    @patch("app.pipeline.httpx.post")
-    def test_openai_compatible_translation_provider(self, mock_post: MagicMock) -> None:
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "content": '["你好", "世界"]'
-                    }
-                }
-            ]
-        }
-        mock_response.raise_for_status.return_value = None
-        mock_post.return_value = mock_response
+    @patch("app.pipeline.OpenAI")
+    def test_openai_compatible_translation_provider(self, mock_openai: MagicMock) -> None:
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock(message=MagicMock(content='["你好", "世界"]'))]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_completion
+        mock_openai.return_value = mock_client
 
         snapshot = self.database.get_config()
         snapshot["translation"].update(
@@ -327,7 +323,27 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
         translations = translate_segments(context, segments)
         self.assertEqual(translations["zh-CN"], ["你好", "世界"])
-        self.assertEqual(mock_post.call_args.kwargs["json"]["model"], "gpt-4o-mini")
+        self.assertEqual(mock_client.chat.completions.create.call_args.kwargs["model"], "gpt-4o-mini")
+
+    @patch("app.pipeline.OpenAI")
+    def test_translation_debug_and_fenced_json_response(self, mock_openai: MagicMock) -> None:
+        mock_completion = MagicMock()
+        mock_completion.choices = [MagicMock(message=MagicMock(content='```json\n["你好，世界。", "第二行。"]\n```'))]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_completion
+        mock_openai.return_value = mock_client
+
+        result = debug_translation_request(
+            api_base_url="http://example.com:8317",
+            api_key="test-key",
+            model="deepseek-chat",
+            timeout_seconds=30,
+            target_language="zh-CN",
+            texts=["hello world.", "second line."],
+        )
+
+        self.assertEqual(result["parsed"], ["你好，世界。", "第二行。"])
+        self.assertEqual(result["base_url"], "http://example.com:8317/v1")
 
 
 if __name__ == "__main__":
