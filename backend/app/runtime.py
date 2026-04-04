@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -67,9 +69,26 @@ class ScannerService:
         scanned = 0
         queued = 0
         skipped = 0
-        for path in input_dir.rglob("*"):
-            if not path.is_file():
-                continue
+        # 收集所有文件，按文件夹创建时间（新→旧）和路径深度（外→内）排序
+        all_files = [p for p in input_dir.rglob("*") if p.is_file()]
+
+        @lru_cache(maxsize=None)
+        def _dir_ctime(d: str) -> float:
+            try:
+                return os.stat(d).st_ctime
+            except OSError:
+                return 0.0
+
+        input_depth = len(input_dir.parts)
+
+        def _sort_key(p: Path):
+            depth = len(p.parts) - input_depth - 1          # 外层优先 (小 → 大)
+            parent_ctime = _dir_ctime(str(p.parent))        # 新建优先 (大 → 小)
+            return (depth, -parent_ctime, p.name)
+
+        all_files.sort(key=_sort_key)
+
+        for path in all_files:
             if ".subpipeline" in path.parts:
                 continue
             if path.suffix.lower() not in allowed:
