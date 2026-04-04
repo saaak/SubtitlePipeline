@@ -1,9 +1,9 @@
 FROM node:22-bookworm AS frontend-build
 
 WORKDIR /app/frontend
-COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
-RUN npm install && npm run build
+RUN npm ci && npm run build
 
 FROM python:3.12-slim-bookworm
 
@@ -18,12 +18,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
+    && mkdir -p /data /output /models /config
+
 COPY backend /app/backend
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 COPY container/supervisord.conf /etc/supervisor/conf.d/subpipeline.conf
-
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt \
-    && mkdir -p /data /output /models /config
 
 EXPOSE 8000
 VOLUME ["/data", "/output", "/models", "/config"]

@@ -5,7 +5,11 @@
       "Bash(openspec validate:*)",
       "Bash(openspec status:*)",
       "Bash(mkdir -p openspec/changes/archive)",
-      "Bash(mv openspec/changes/build-local-subtitle-pipeline-mvp openspec/changes/archive/2026-04-02-build-local-subtitle-pipeline-mvp)"
+      "Bash(mv openspec/changes/build-local-subtitle-pipeline-mvp openspec/changes/archive/2026-04-02-build-local-subtitle-pipeline-mvp)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/app/pipeline.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -m pytest backend/tests/test_mvp.py -x -q)",
+      "Bash(python -c \"from app.pipeline import *; print\\('All imports OK'\\)\")",
+      "Bash(python -c \"from app.pipeline import build_chunks, parse_numbered_lines_ordered, parse_chunk_output, ParseResult, CHUNK_SIZE, CONTEXT_SIZE, MAX_PARTIAL_RETRIES; print\\(f'CHUNK_SIZE={CHUNK_SIZE}, CONTEXT_SIZE={CONTEXT_SIZE}, MAX_PARTIAL_RETRIES={MAX_PARTIAL_RETRIES}'\\); r = parse_numbered_lines_ordered\\('0|hello\\\\n1|world\\\\n3|test', [0,1,2,3]\\); print\\(f'matched={r.matched}, first_failed={r.first_failed_position}'\\)\")"
     ],
     "additionalDirectories": [
       "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"

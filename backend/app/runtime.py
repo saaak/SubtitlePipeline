@@ -35,6 +35,15 @@ from .store import Database
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".m4v"}
 
 
+def _mux_output_suffix(config: dict) -> str:
+    """Return the fixed suffix of mux output filenames (e.g. '.subbed.mkv')."""
+    template = str(config.get("mux", {}).get("filename_template", "")).strip()
+    if not template:
+        return ""
+    suffix = template.replace("{stem}", "")
+    return suffix if suffix else ""
+
+
 @dataclass
 class ScanResult:
     scanned: int
@@ -54,6 +63,7 @@ class ScannerService:
         allowed = {extension.lower() for extension in file_config.get("allowed_extensions", [])} or VIDEO_EXTENSIONS
         min_size_bytes = int(file_config["min_size_mb"]) * 1024 * 1024
         max_size_bytes = int(file_config["max_size_mb"]) * 1024 * 1024
+        mux_suffix = _mux_output_suffix(config)
         scanned = 0
         queued = 0
         skipped = 0
@@ -63,6 +73,8 @@ class ScannerService:
             if ".subpipeline" in path.parts:
                 continue
             if path.suffix.lower() not in allowed:
+                continue
+            if mux_suffix and path.name.endswith(mux_suffix):
                 continue
             scanned += 1
             stat = path.stat()

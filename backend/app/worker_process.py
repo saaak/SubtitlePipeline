@@ -8,6 +8,7 @@ from .store import Database
 def main() -> None:
     database = Database(resolve_db_path())
     database.initialize()
+    database.recover_orphaned_tasks()
     database.clear_restart_required()
     WorkerService(database).run_forever()
 

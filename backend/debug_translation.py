@@ -20,14 +20,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-language", default="zh-CN")
     parser.add_argument("--timeout-seconds", type=int, default=120)
     parser.add_argument("--text", action="append", dest="texts")
+    parser.add_argument("--subpipeline-dir")
+    parser.add_argument("--segments-file")
     return parser
+
+
+def load_texts(args: argparse.Namespace) -> list[str]:
+    segments_path: Path | None = None
+    if args.segments_file:
+        segments_path = Path(args.segments_file)
+    elif args.subpipeline_dir:
+        segments_path = Path(args.subpipeline_dir) / "processed_segments.json"
+    if segments_path is None:
+        return args.texts or ["hello world.", "second line."]
+    if not segments_path.exists():
+        raise PipelineError(f"未找到真实数据文件: {segments_path}")
+    payload = json.loads(segments_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise PipelineError(f"真实数据文件格式无效: {segments_path}")
+    texts = [str(item.get("text", "")).strip() for item in payload]
+    texts = [text for text in texts if text]
+    if not texts:
+        raise PipelineError(f"真实数据文件中没有可用文本: {segments_path}")
+    return texts
 
 
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    texts = args.texts or ["hello world.", "second line."]
     try:
+        texts = load_texts(args)
         result = debug_translation_request(
             api_base_url=args.api_base_url,
             api_key=args.api_key,

@@ -18,10 +18,11 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 50
-CONTEXT_SIZE = 10
-MAX_CHUNK_WORKERS = 3
+CHUNK_SIZE = 15
+CONTEXT_SIZE = 5
+MAX_CHUNK_WORKERS = 1
 MAX_CHUNK_RETRIES = 5
+MAX_PARTIAL_RETRIES = 3
 
 TRANSLATION_PRESETS = {
     "general": "You are a professional subtitle translator. Keep the translation natural, accurate, concise, and easy to read on screen.",
@@ -146,31 +147,82 @@ def strip_number_prefix(line: str) -> str:
     return re.sub(r"^\s*\d+\|", "", line, count=1).strip()
 
 
+@dataclass
+class ParseResult:
+    """Result of parsing numbered translation lines.
+
+    ``matched`` maps expected line index -> translated text for all lines
+    that were successfully parsed in order.  ``first_failed_position``
+    is the 0-based position in ``expected_ids`` where the first gap or
+    mismatch occurred (``None`` means everything matched).
+    """
+    matched: dict[int, str]
+    first_failed_position: int | None
+
+
+def parse_numbered_lines_ordered(
+    raw_output: str,
+    expected_ids: list[int],
+) -> ParseResult:
+    """Parse ``编号|译文`` lines and identify the first failure point.
+
+    Lines are scanned in document order.  The parser collects every valid
+    match whose index belongs to ``expected_ids``.  After collecting, we
+    walk ``expected_ids`` sequentially; the first id that is missing marks
+    the failure boundary – every id *before* it is considered valid, every
+    id from that point on is considered failed (even if some later ids
+    happened to match) so that the caller can retry a contiguous suffix.
+    """
+    matches: dict[int, str] = {}
+    expected = set(expected_ids)
+    for line in strip_code_fence(raw_output).splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        # Try to match "编号|译文" format
+        if "|" in normalized:
+            prefix, value = normalized.split("|", 1)
+            if prefix.strip().isdigit():
+                index = int(prefix.strip())
+                if index in expected and index not in matches:
+                    matches[index] = value.strip()
+                continue
+        # Also accept "编号. 译文" or "编号: 译文" as fallback
+        m = re.match(r"^\s*(\d+)\s*[.:：]\s*(.+)$", normalized)
+        if m:
+            index = int(m.group(1))
+            if index in expected and index not in matches:
+                matches[index] = m.group(2).strip()
+
+    # Walk expected_ids to find the first gap
+    first_failed: int | None = None
+    for position, eid in enumerate(expected_ids):
+        if eid not in matches:
+            first_failed = position
+            break
+
+    if first_failed is not None:
+        # Only keep the contiguous prefix (discard any sporadic matches after the gap)
+        valid_ids = set(expected_ids[:first_failed])
+        matches = {k: v for k, v in matches.items() if k in valid_ids}
+
+    return ParseResult(matched=matches, first_failed_position=first_failed)
+
+
 def parse_numbered_lines(
     raw_output: str,
     expected_ids: list[int],
     source_texts: list[str] | None = None,
 ) -> list[str] | None:
-    matches: dict[int, str] = {}
-    expected = set(expected_ids)
-    for line in strip_code_fence(raw_output).splitlines():
-        normalized = line.strip()
-        if not normalized or "|" not in normalized:
-            continue
-        prefix, value = normalized.split("|", 1)
-        if not prefix.strip().isdigit():
-            continue
-        index = int(prefix.strip())
-        if index in expected and index not in matches:
-            matches[index] = value.strip()
-    if len(matches) == len(expected_ids):
-        return [matches[index] for index in expected_ids]
+    result = parse_numbered_lines_ordered(raw_output, expected_ids)
+    if result.first_failed_position is None:
+        return [result.matched[eid] for eid in expected_ids]
     if source_texts is not None and expected_ids:
-        matched_ratio = len(matches) / len(expected_ids)
+        matched_ratio = len(result.matched) / len(expected_ids)
         if matched_ratio >= 0.8:
-            missing = [index for index in expected_ids if index not in matches]
+            missing = [eid for eid in expected_ids if eid not in result.matched]
             logger.warning("分块翻译部分匹配，缺失编号将回退原文: %s", missing)
-            return [matches.get(index, source_texts[position]) for position, index in enumerate(expected_ids)]
+            return [result.matched.get(eid, source_texts[pos]) for pos, eid in enumerate(expected_ids)]
     return None
 
 
@@ -193,7 +245,15 @@ def parse_chunk_output(
     lines = [strip_number_prefix(line) for line in strip_code_fence(raw_output).splitlines() if line.strip()]
     if len(lines) == len(expected_ids):
         return lines
-    raise PipelineError("真实翻译 provider 返回结果数量与输入不一致")
+    # Last resort: if lines are close (within 20%), pad or truncate
+    if lines and abs(len(lines) - len(expected_ids)) <= max(1, len(expected_ids) // 5):
+        logger.warning("翻译结果行数 %d != 期望 %d，尝试对齐", len(lines), len(expected_ids))
+        if len(lines) > len(expected_ids):
+            return lines[:len(expected_ids)]
+        return lines + [source_texts[i] for i in range(len(lines), len(expected_ids))]
+    raise PipelineError(
+        f"翻译返回结果无法解析 (得到 {len(lines)} 行, 期望 {len(expected_ids)} 行)"
+    )
 
 
 class ChunkedTranslator:
@@ -300,13 +360,83 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         if not self.api_key:
             raise PipelineError("translation.api_key 未配置，无法调用真实翻译 provider")
         prompt = self._build_prompt(target_language, content_type, custom_prompt)
-        content = self._request_translation(prompt, build_chunk_user_message(chunk))
-        return parse_chunk_output(
-            content,
-            [line.index for line in chunk.main_segments],
-            texts,
-            self._parse_json_array_content,
-        )
+
+        # Partial-retry loop: keep valid prefix, only retry the tail
+        results: list[str | None] = [None] * len(texts)
+        remaining_segments = list(chunk.main_segments)
+        remaining_context_before = list(chunk.context_before)
+
+        for attempt in range(MAX_PARTIAL_RETRIES + 1):
+            if not remaining_segments:
+                break
+
+            retry_chunk = TranslationChunk(
+                start_index=remaining_segments[0].index,
+                context_before=remaining_context_before,
+                main_segments=remaining_segments,
+                context_after=chunk.context_after,
+                use_sections=chunk.use_sections or len(remaining_context_before) > 0,
+            )
+            content = self._request_translation(prompt, build_chunk_user_message(retry_chunk))
+            remaining_ids = [line.index for line in remaining_segments]
+            remaining_texts = [line.text for line in remaining_segments]
+
+            # Try full parse first
+            try:
+                parsed = parse_chunk_output(
+                    content, remaining_ids, remaining_texts, self._parse_json_array_content,
+                )
+                # Full success — fill in all remaining results
+                for seg, translated in zip(remaining_segments, parsed):
+                    pos = next(i for i, s in enumerate(chunk.main_segments) if s.index == seg.index)
+                    results[pos] = translated
+                remaining_segments = []
+                break
+            except PipelineError:
+                pass
+
+            # Full parse failed — try ordered partial parse
+            pr = parse_numbered_lines_ordered(content, remaining_ids)
+            if pr.matched:
+                for seg_idx, translated in pr.matched.items():
+                    pos = next(i for i, s in enumerate(chunk.main_segments) if s.index == seg_idx)
+                    results[pos] = translated
+
+                if pr.first_failed_position is not None:
+                    # Keep matched prefix, retry from the failure point
+                    kept = remaining_segments[:pr.first_failed_position]
+                    remaining_context_before = kept[-CONTEXT_SIZE:] if kept else remaining_context_before
+                    remaining_segments = remaining_segments[pr.first_failed_position:]
+                    logger.warning(
+                        "分块部分翻译成功 %d/%d，重试剩余 %d 条 (第 %d 次)",
+                        len(pr.matched), len(remaining_ids),
+                        len(remaining_segments), attempt + 1,
+                    )
+                    continue
+                else:
+                    remaining_segments = []
+                    break
+
+            # Nothing matched at all on this attempt
+            if attempt < MAX_PARTIAL_RETRIES:
+                logger.warning(
+                    "分块翻译完全失败，重试整块 (第 %d 次)", attempt + 1,
+                )
+                continue
+            else:
+                raise PipelineError(
+                    f"分块翻译经过 {MAX_PARTIAL_RETRIES + 1} 次尝试仍无法解析"
+                )
+
+        # Fill any remaining None with source text as last resort
+        final: list[str] = []
+        for i, val in enumerate(results):
+            if val is None:
+                logger.warning("翻译缺失行 %d，回退为原文", chunk.main_segments[i].index)
+                final.append(texts[i])
+            else:
+                final.append(val)
+        return final
 
     def _resolve_base_url(self) -> str:
         if self.api_base_url.endswith("/v1"):
@@ -315,13 +445,29 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
 
     def _request_translation(self, prompt: str, user_content: str) -> str:
         try:
-            response = self.client.chat.completions.create(
+            stream = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": prompt},
                     {"role": "user", "content": user_content},
                 ],
+                max_tokens=8192,
+                stream=True,
+                temperature=0.3,
+                frequency_penalty=1.2,
+                presence_penalty=0.8,
             )
+            parts: list[str] = []
+            finish_reason: str | None = None
+            for chunk in stream:
+                choice = chunk.choices[0] if chunk.choices else None
+                if choice is None:
+                    continue
+                if choice.delta and choice.delta.content:
+                    print(choice.delta.content, end="", flush=True)
+                    parts.append(choice.delta.content)
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
         except openai.AuthenticationError as exc:
             raise PipelineError("翻译服务鉴权失败，请检查 API Key") from exc
         except openai.RateLimitError as exc:
@@ -334,12 +480,11 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
             raise PipelineError(f"翻译服务返回异常状态 {exc.status_code}") from exc
         except openai.APIError as exc:
             raise PipelineError(f"翻译服务调用失败: {exc}") from exc
-        try:
-            content = response.choices[0].message.content
-        except (KeyError, IndexError, TypeError) as exc:
-            raise PipelineError("真实翻译 provider 返回格式无效") from exc
-        if not isinstance(content, str):
+        content = "".join(parts)
+        if not content:
             raise PipelineError("真实翻译 provider 未返回文本内容")
+        if finish_reason == "length":
+            logger.warning("翻译输出被截断 (finish_reason=length)，可能影响解析")
         return content
 
     def _build_prompt(self, target_language: str, content_type: str = "general", custom_prompt: str = "") -> str:
@@ -702,21 +847,24 @@ def build_subtitle_tracks(context: TaskContext, translations: dict[str, list[str
         )
         return tracks
     for language, translated_lines in translations.items():
-        tracks.append(
-            {
-                "language": language,
-                "path": target_dir / template.format(stem=source_path.stem, lang=language),
-                "translated_lines": translated_lines if subtitle_config["bilingual_mode"] == "merge" else None,
-            }
-        )
-    if subtitle_config["bilingual_mode"] == "separate":
-        tracks.append(
-            {
-                "language": str(subtitle_config.get("source_language", "source")),
-                "path": target_dir / template.format(stem=source_path.stem, lang="source"),
-                "translated_lines": None,
-            }
-        )
+        if subtitle_config["bilingual_mode"] == "merge":
+            tracks.append(
+                {
+                    "language": language,
+                    "path": target_dir / template.format(stem=source_path.stem, lang=language),
+                    "translated_lines": translated_lines,
+                }
+            )
+        else:
+            # separate mode: only target language, replace source text
+            tracks.append(
+                {
+                    "language": language,
+                    "path": target_dir / template.format(stem=source_path.stem, lang=language),
+                    "translated_lines": translated_lines,
+                    "replace_source": True,
+                }
+            )
     return tracks
 
 
@@ -730,19 +878,22 @@ def render_srt(
     outputs: list[str] = []
     for track in build_subtitle_tracks(context, translations):
         output_path = Path(track["path"])
-        content = build_srt_content(segments, track["translated_lines"])
+        content = build_srt_content(segments, track["translated_lines"], replace_source=track.get("replace_source", False))
         ensure_parent(output_path)
         output_path.write_text(content, encoding="utf-8")
         outputs.append(str(output_path))
     return outputs
 
 
-def build_srt_content(segments: list[dict[str, Any]], translated_lines: list[str] | None) -> str:
+def build_srt_content(segments: list[dict[str, Any]], translated_lines: list[str] | None, replace_source: bool = False) -> str:
     blocks: list[str] = []
     for index, segment in enumerate(segments, start=1):
-        lines = [segment["text"]]
-        if translated_lines:
-            lines.append(translated_lines[index - 1])
+        if replace_source and translated_lines:
+            lines = [translated_lines[index - 1]]
+        else:
+            lines = [segment["text"]]
+            if translated_lines:
+                lines.append(translated_lines[index - 1])
         blocks.append(
             "\n".join(
                 [
@@ -827,7 +978,7 @@ def mux_subtitle(context: TaskContext, subtitle_paths: list[str]) -> str:
     command = [ffmpeg_path, "-y", "-i", str(source_path)]
     for subtitle_path in subtitle_paths:
         command.extend(["-i", subtitle_path])
-    command.extend(["-map", "0"])
+    command.extend(["-map", "0:v", "-map", "0:a"])
     for index in range(len(subtitle_paths)):
         command.extend(["-map", str(index + 1)])
     command.extend(["-c", "copy", "-c:s", "srt"])

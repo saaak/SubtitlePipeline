@@ -4,9 +4,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get update && apt-get install -y --no-install-recommends nodejs
 
 WORKDIR /app/frontend
-COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
-RUN npm install && npm run build
+RUN npm ci && npm run build
 
 FROM nvidia/cuda:12.6.1-runtime-ubuntu22.04
 
@@ -22,12 +22,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt \
+    && mkdir -p /data /output /models /config
+
 COPY backend /app/backend
 COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 COPY container/supervisord.conf /etc/supervisor/conf.d/subpipeline.conf
-
-RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt \
-    && mkdir -p /data /output /models /config
 
 EXPOSE 8000
 VOLUME ["/data", "/output", "/models", "/config"]

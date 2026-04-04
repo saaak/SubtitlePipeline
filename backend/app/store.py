@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
+
+logger = logging.getLogger(__name__)
 
 from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config
 from .pipeline import check_resume_feasibility, cleanup_intermediates, cleanup_work_dir_intermediates
@@ -251,6 +254,26 @@ class Database:
                     (now,),
                 )
         return self.get_config()
+
+    def recover_orphaned_tasks(self) -> int:
+        """Reset tasks stuck in 'processing' (e.g. after a crash) to 'failed' so users can retry."""
+        now = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed',
+                    error_message = '系统重启，任务中断',
+                    updated_at = ?,
+                    finished_at = ?
+                WHERE status = 'processing'
+                """,
+                (now, now),
+            )
+            count = cursor.rowcount
+        if count:
+            logger.warning("系统启动: 已将 %d 个中断的 processing 任务标记为 failed", count)
+        return count
 
     def clear_restart_required(self) -> None:
         with self.connect() as connection:

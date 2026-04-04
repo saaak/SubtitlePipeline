@@ -105,7 +105,7 @@ export function TasksPage() {
                       >
                         继续执行
                       </button>
-                      {resumeChecks[task.id] && !resumeChecks[task.id].can_resume ? <span className="muted">中间文件缺失</span> : null}
+                      {task.status !== 'done' && resumeChecks[task.id] && !resumeChecks[task.id].can_resume ? <span className="muted">中间文件缺失</span> : null}
                     </>
                   ) : null}
                   {task.status === 'processing' ? (
