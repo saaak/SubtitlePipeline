@@ -435,10 +435,11 @@ export function SettingsPage() {
                 <option value="ja">ja</option>
               </select>
             </label>
-            <label>
-              <span>文件名模板</span>
+            <div className="field-block">
+              <span className="field-label">文件名模板</span>
               <input value={config.subtitle.filename_template} onChange={(event) => setField('subtitle', 'filename_template', event.target.value)} />
-            </label>
+              <span className="muted">{'可用占位符：{stem} = 源文件名（不含扩展名），{lang} = 语言代码（如 zh-CN）或 bilingual / source'}</span>
+            </div>
           </div>
         </div>
 
@@ -458,14 +459,15 @@ export function SettingsPage() {
               placeholder="留空则输出到源文件目录"
               disabled={!config.mux.enabled}
             />
-            <label>
-              <span>压片文件名模板</span>
+            <div className="field-block">
+              <span className="field-label">压片文件名模板</span>
               <input
                 disabled={!config.mux.enabled}
                 value={config.mux.filename_template}
                 onChange={(event) => setField('mux', 'filename_template', event.target.value)}
               />
-            </label>
+              <span className="muted">{'可用占位符：{stem} = 源文件名（不含扩展名）'}</span>
+            </div>
           </div>
         </div>
       </div>
