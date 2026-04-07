@@ -43,10 +43,23 @@ export type LogResponse = {
   page_size: number
 }
 
+export type RetryMode = 'restart' | 'resume'
+export type BilingualMode = 'merge' | 'separate'
+export type SourceLanguage = 'auto' | 'en' | 'zh' | 'ja'
+
+export type TranslationContentType =
+  | 'general'
+  | 'movie'
+  | 'documentary'
+  | 'anime'
+  | 'tech_talk'
+  | 'variety_show'
+  | 'news'
+
 export type AppConfig = {
   file: {
     input_dir: string
-    output_dir: string
+    output_to_source_dir: boolean
     allowed_extensions: string[]
     scan_interval_seconds: number
     min_size_mb: number
@@ -67,7 +80,6 @@ export type AppConfig = {
     device: string
     audio_format: string
     sample_rate: number
-    align_model: string
   }
   translation: {
     enabled: boolean
@@ -82,18 +94,15 @@ export type AppConfig = {
   }
   subtitle: {
     bilingual: boolean
-    bilingual_mode: string
+    bilingual_mode: BilingualMode
     filename_template: string
-    source_language: string
-    text_process_style: string
+    source_language: SourceLanguage
   }
   mux: {
     enabled: boolean
-    output_dir: string
     filename_template: string
   }
   logging: {
-    page_size: number
     level: string
   }
   meta?: {
@@ -143,8 +152,6 @@ export type TranslationTestResponse = {
   message: string
 }
 
-export type RetryMode = 'restart' | 'resume'
-
 export type ResumeCheckResponse = {
   can_resume: boolean
   missing: string[]
@@ -156,15 +163,6 @@ export type BrowseDirectoryResponse = {
   dirs: string[]
 }
 
-export type TranslationContentType =
-  | 'general'
-  | 'movie'
-  | 'documentary'
-  | 'anime'
-  | 'tech_talk'
-  | 'variety_show'
-  | 'news'
-
 export const translationContentTypeOptions: Array<{ value: TranslationContentType; label: string }> = [
   { value: 'general', label: '通用' },
   { value: 'movie', label: '电影/电视剧' },
@@ -175,10 +173,27 @@ export const translationContentTypeOptions: Array<{ value: TranslationContentTyp
   { value: 'news', label: '新闻' },
 ]
 
+export const bilingualModeOptions: Array<{ value: BilingualMode; label: string }> = [
+  { value: 'merge', label: '合并显示' },
+  { value: 'separate', label: '分离显示' },
+]
+
+export const retryModeOptions: Array<{ value: RetryMode; label: string }> = [
+  { value: 'restart', label: '从头重试' },
+  { value: 'resume', label: '断点续传' },
+]
+
+export const sourceLanguageOptions: Array<{ value: SourceLanguage; label: string }> = [
+  { value: 'auto', label: '自动检测' },
+  { value: 'en', label: '英语' },
+  { value: 'zh', label: '中文' },
+  { value: 'ja', label: '日语' },
+]
+
 export const defaultAppConfig: AppConfig = {
   file: {
     input_dir: '/data',
-    output_dir: '',
+    output_to_source_dir: true,
     allowed_extensions: ['.mp4', '.mkv', '.mov', '.avi'],
     scan_interval_seconds: 5,
     min_size_mb: 1,
@@ -196,10 +211,9 @@ export const defaultAppConfig: AppConfig = {
   },
   whisper: {
     model_name: 'small',
-    device: 'cpu',
+    device: 'auto',
     audio_format: 'wav',
     sample_rate: 16000,
-    align_model: 'auto',
   },
   translation: {
     enabled: true,
@@ -217,15 +231,12 @@ export const defaultAppConfig: AppConfig = {
     bilingual_mode: 'merge',
     filename_template: '{stem}.{lang}.srt',
     source_language: 'auto',
-    text_process_style: 'basic',
   },
   mux: {
     enabled: false,
-    output_dir: '',
     filename_template: '{stem}.subbed.mkv',
   },
   logging: {
-    page_size: 50,
     level: 'INFO',
   },
   meta: {

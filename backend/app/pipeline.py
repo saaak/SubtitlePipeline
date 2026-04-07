@@ -72,13 +72,19 @@ class WhisperModelCache:
         self._model: Any | None = None
         self._model_name: str | None = None
         self._model_device: str | None = None
+        self._model_language: str | None = None
         self._align_model: Any | None = None
         self._align_metadata: Any | None = None
         self._align_language: str | None = None
         self._align_device: str | None = None
 
-    def get_model(self, name: str, device: str) -> Any:
-        if self._model is not None and self._model_name == name and self._model_device == device:
+    def get_model(self, name: str, device: str, language: str | None = None) -> Any:
+        if (
+            self._model is not None
+            and self._model_name == name
+            and self._model_device == device
+            and self._model_language == language
+        ):
             return self._model
         try:
             import whisperx  # type: ignore
@@ -87,13 +93,13 @@ class WhisperModelCache:
         models_root = Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
         local_model_dir = models_root / name
         model_reference = str(local_model_dir) if local_model_dir.exists() else name
-        self._model = whisperx.load_model(
-            model_reference,
-            device,
-            download_root=str(models_root),
-        )
+        kwargs = {"download_root": str(models_root)}
+        if language is not None:
+            kwargs["language"] = language
+        self._model = whisperx.load_model(model_reference, device, **kwargs)
         self._model_name = name
         self._model_device = device
+        self._model_language = language
         return self._model
 
     def get_align_model(self, language: str, device: str) -> tuple[Any, Any]:
@@ -725,12 +731,15 @@ def load_asr_result(context: TaskContext) -> dict[str, Any]:
 
 def run_asr(context: TaskContext, audio_path: Path, model_cache: WhisperModelCache | None = None) -> dict[str, Any]:
     whisper_config = context.config_snapshot["whisper"]
+    subtitle_config = context.config_snapshot["subtitle"]
+    source_language = str(subtitle_config.get("source_language", "auto")).strip().lower()
+    language_hint = source_language if source_language and source_language != "auto" else None
     cache = model_cache or WhisperModelCache()
     try:
         import whisperx  # type: ignore
     except ImportError as exc:
         raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-    model = cache.get_model(str(whisper_config["model_name"]), str(whisper_config["device"]))
+    model = cache.get_model(str(whisper_config["model_name"]), str(whisper_config["device"]), language_hint)
     result = model.transcribe(str(audio_path))
     align_model, metadata = cache.get_align_model(str(result.get("language", "en")), str(whisper_config["device"]))
     aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), whisper_config["device"])
@@ -865,8 +874,10 @@ def format_srt_time(seconds: float) -> str:
 def get_subtitle_target_dir(context: TaskContext) -> Path:
     file_config = context.config_snapshot["file"]
     source_path = Path(context.file_path)
-    output_dir = str(file_config["output_dir"]).strip()
-    return source_path.parent if not output_dir else Path(output_dir)
+    output_to_source_dir = bool(file_config.get("output_to_source_dir", True))
+    if output_to_source_dir:
+        return source_path.parent
+    return Path(os.environ.get("SUBPIPELINE_OUTPUT_DIR", "/output"))
 
 
 def build_subtitle_tracks(context: TaskContext, translations: dict[str, list[str]]) -> list[dict[str, Any]]:
@@ -1004,8 +1015,8 @@ def _sanitize_language_code(value: str) -> str:
 def _resolve_mux_output_path(context: TaskContext) -> Path:
     mux_config = context.config_snapshot["mux"]
     source_path = Path(context.file_path)
-    output_dir = str(mux_config["output_dir"]).strip()
-    target_dir = source_path.parent if not output_dir else Path(output_dir)
+    output_to_source_dir = bool(context.config_snapshot["file"].get("output_to_source_dir", True))
+    target_dir = source_path.parent if output_to_source_dir else Path(os.environ.get("SUBPIPELINE_OUTPUT_DIR", "/output"))
     target_dir.mkdir(parents=True, exist_ok=True)
     filename = str(mux_config["filename_template"]).format(stem=source_path.stem)
     output_path = target_dir / filename

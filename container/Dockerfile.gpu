@@ -22,8 +22,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements.txt \
+COPY backend/requirements-gpu.txt /app/backend/requirements-gpu.txt
+RUN python3 -m pip install --no-cache-dir -r /app/backend/requirements-gpu.txt \
     && mkdir -p /data /output /models /config
 
 COPY backend /app/backend

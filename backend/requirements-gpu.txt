@@ -1,0 +1,13 @@
+fastapi==0.116.1
+uvicorn==0.35.0
+pydantic==2.11.7
+httpx==0.28.1
+openai==2.11.0
+huggingface_hub==0.35.3
+
+# GPU-accelerated PyTorch (CUDA 12.6)
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.6.0+cu126
+torchaudio==2.6.0+cu126
+
+whisperx==3.8.5

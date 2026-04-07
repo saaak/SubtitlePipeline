@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   activateModel,
   AppConfig,
+  bilingualModeOptions,
   cloneConfig,
   defaultAppConfig,
   downloadModel,
@@ -11,10 +12,14 @@ import {
   getModels,
   ModelListResponse,
   setSetupComplete,
+  sourceLanguageOptions,
   testTranslation,
   translationContentTypeOptions,
   updateConfig,
 } from '../api'
+import { DirectoryPicker } from '../components/DirectoryPicker'
+
+type GroupName = 'file' | 'translation' | 'subtitle'
 
 export function SetupWizard({
   onCompleted,
@@ -38,7 +43,10 @@ export function SetupWizard({
       const [nextConfig, nextModels] = await Promise.all([getConfig(), getModels()])
       setConfig(nextConfig)
       setModels(nextModels)
-      setSelectedModel((current) => current || nextModels.current_model || nextModels.items.find((item) => item.status === 'installed')?.name || 'small')
+      setSelectedModel(
+        (current) =>
+          current || nextModels.current_model || nextModels.items.find((item) => item.status === 'installed')?.name || 'small',
+      )
       setError('')
     } catch (err) {
       setError(err instanceof Error ? err.message : '初始化信息读取失败')
@@ -51,17 +59,34 @@ export function SetupWizard({
     void load()
   }, [])
 
+  const setField = <T extends GroupName, K extends keyof AppConfig[T]>(group: T, key: K, value: AppConfig[T][K]) => {
+    setConfig((current) => ({
+      ...current,
+      [group]: {
+        ...current[group],
+        [key]: value,
+      },
+    }))
+  }
+
   const selectedModelItem = useMemo(
     () => models.items.find((item) => item.name === selectedModel),
     [models.items, selectedModel],
   )
-
-  const canMoveFromStepOne = Boolean(selectedModelItem && selectedModelItem.status === 'installed')
+  const canMoveFromModelStep = Boolean(selectedModelItem && selectedModelItem.status === 'installed')
+  const outputModeLabel = config.file.output_to_source_dir ? '源文件目录' : '/output 目录'
+  const sourceLanguageLabel =
+    sourceLanguageOptions.find((option) => option.value === config.subtitle.source_language)?.label || config.subtitle.source_language
+  const bilingualModeLabel =
+    bilingualModeOptions.find((option) => option.value === config.subtitle.bilingual_mode)?.label || config.subtitle.bilingual_mode
+  const translationContentTypeLabel =
+    translationContentTypeOptions.find((option) => option.value === config.translation.content_type)?.label || config.translation.content_type
 
   const handleDownload = async (name: string) => {
     try {
       const result = await downloadModel(name)
       setMessage(result.message)
+      setError('')
       setSelectedModel(name)
       await load()
     } catch (err) {
@@ -106,6 +131,8 @@ export function SetupWizard({
       }
       await activateModel(selectedModel)
       await updateConfig({
+        file: config.file,
+        subtitle: config.subtitle,
         translation: config.translation,
       })
       await setSetupComplete(true)
@@ -127,10 +154,10 @@ export function SetupWizard({
       <header className="wizard-header">
         <div>
           <h1>首次引导</h1>
-          <p>完成模型准备与翻译配置后，即可进入任务主界面。</p>
+          <p>完成路径、模型、字幕偏好与翻译配置后，即可进入任务主界面。</p>
         </div>
         <div className="wizard-steps">
-          {[1, 2, 3].map((value) => (
+          {[1, 2, 3, 4, 5].map((value) => (
             <span key={value} className={`wizard-step ${value === step ? 'active' : value < step ? 'done' : ''}`}>
               {value}
             </span>
@@ -145,7 +172,45 @@ export function SetupWizard({
         <div className="card">
           <div className="card-header">
             <div>
-              <h2>步骤 1：模型准备</h2>
+              <h2>步骤 1：路径配置</h2>
+              <p>先确认扫描目录与输出位置，后续字幕和压片都会沿用这里的设置。</p>
+            </div>
+          </div>
+          <div className="field-grid">
+            <DirectoryPicker
+              label="输入目录"
+              value={config.file.input_dir}
+              onChange={(value) => setField('file', 'input_dir', value)}
+              placeholder="例如 /data"
+            />
+            <div className="field-block">
+              <label className="switch-row">
+                <span>输出到源文件目录</span>
+                <input
+                  type="checkbox"
+                  checked={config.file.output_to_source_dir}
+                  onChange={(event) => setField('file', 'output_to_source_dir', event.target.checked)}
+                />
+              </label>
+              <span className="muted">
+                {config.file.output_to_source_dir
+                  ? '字幕和压片结果会直接写回源视频所在目录。'
+                  : '字幕和压片结果会统一输出到 /output 目录。'}
+              </span>
+            </div>
+          </div>
+          <div className="page-actions">
+            <button disabled>上一步</button>
+            <button onClick={() => setStep(2)}>下一步</button>
+          </div>
+        </div>
+      ) : null}
+
+      {step === 2 ? (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h2>步骤 2：模型准备</h2>
               <p>请选择一个已安装模型，或先触发下载。也可手动挂载本地模型到 /models 目录。</p>
             </div>
             <button onClick={() => void load()}>检测本地模型</button>
@@ -196,19 +261,77 @@ export function SetupWizard({
             ))}
           </div>
           <div className="page-actions">
-            <button disabled>上一步</button>
-            <button disabled={!canMoveFromStepOne} onClick={() => setStep(2)}>
+            <button onClick={() => setStep(1)}>上一步</button>
+            <button disabled={!canMoveFromModelStep} onClick={() => setStep(3)}>
               下一步
             </button>
           </div>
         </div>
       ) : null}
 
-      {step === 2 ? (
+      {step === 3 ? (
         <div className="card">
           <div className="card-header">
             <div>
-              <h2>步骤 2：翻译配置</h2>
+              <h2>步骤 3：语言与字幕偏好</h2>
+              <p>这里的源语言会同时用于 Whisper 识别提示和字幕命名。</p>
+            </div>
+          </div>
+          <div className="field-grid">
+            <label>
+              <span>源语言</span>
+              <select
+                value={config.subtitle.source_language}
+                onChange={(event) =>
+                  setField('subtitle', 'source_language', event.target.value as AppConfig['subtitle']['source_language'])
+                }
+              >
+                {sourceLanguageOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <span className="muted">无法确定时建议保留自动检测；选错语言可能影响识别效果。</span>
+            </label>
+            <label className="switch-row">
+              <span>双语字幕</span>
+              <input
+                type="checkbox"
+                checked={config.subtitle.bilingual}
+                onChange={(event) => setField('subtitle', 'bilingual', event.target.checked)}
+              />
+            </label>
+            {config.subtitle.bilingual ? (
+              <label>
+                <span>双语模式</span>
+                <select
+                  value={config.subtitle.bilingual_mode}
+                  onChange={(event) =>
+                    setField('subtitle', 'bilingual_mode', event.target.value as AppConfig['subtitle']['bilingual_mode'])
+                  }
+                >
+                  {bilingualModeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+          </div>
+          <div className="page-actions">
+            <button onClick={() => setStep(2)}>上一步</button>
+            <button onClick={() => setStep(4)}>下一步</button>
+          </div>
+        </div>
+      ) : null}
+
+      {step === 4 ? (
+        <div className="card">
+          <div className="card-header">
+            <div>
+              <h2>步骤 4：翻译配置</h2>
               <p>翻译配置为可选项，关闭后系统只生成源语言字幕。</p>
             </div>
             <label className="switch-row">
@@ -216,15 +339,7 @@ export function SetupWizard({
               <input
                 type="checkbox"
                 checked={config.translation.enabled}
-                onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      enabled: event.target.checked,
-                    },
-                  }))
-                }
+                onChange={(event) => setField('translation', 'enabled', event.target.checked)}
               />
             </label>
           </div>
@@ -234,15 +349,7 @@ export function SetupWizard({
               <input
                 disabled={!config.translation.enabled}
                 value={config.translation.api_base_url}
-                onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      api_base_url: event.target.value,
-                    },
-                  }))
-                }
+                onChange={(event) => setField('translation', 'api_base_url', event.target.value)}
               />
             </label>
             <label>
@@ -251,15 +358,7 @@ export function SetupWizard({
                 disabled={!config.translation.enabled}
                 type="password"
                 value={config.translation.api_key}
-                onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      api_key: event.target.value,
-                    },
-                  }))
-                }
+                onChange={(event) => setField('translation', 'api_key', event.target.value)}
               />
             </label>
             <label>
@@ -267,15 +366,7 @@ export function SetupWizard({
               <input
                 disabled={!config.translation.enabled}
                 value={config.translation.model}
-                onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      model: event.target.value,
-                    },
-                  }))
-                }
+                onChange={(event) => setField('translation', 'model', event.target.value)}
               />
             </label>
             <label>
@@ -284,16 +375,14 @@ export function SetupWizard({
                 disabled={!config.translation.enabled}
                 value={config.translation.target_languages.join(', ')}
                 onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      target_languages: event.target.value
-                        .split(',')
-                        .map((item) => item.trim())
-                        .filter(Boolean),
-                    },
-                  }))
+                  setField(
+                    'translation',
+                    'target_languages',
+                    event.target.value
+                      .split(',')
+                      .map((item) => item.trim())
+                      .filter(Boolean),
+                  )
                 }
               />
             </label>
@@ -303,13 +392,7 @@ export function SetupWizard({
                 disabled={!config.translation.enabled}
                 value={config.translation.content_type}
                 onChange={(event) =>
-                  setConfig((current) => ({
-                    ...current,
-                    translation: {
-                      ...current.translation,
-                      content_type: event.target.value as AppConfig['translation']['content_type'],
-                    },
-                  }))
+                  setField('translation', 'content_type', event.target.value as AppConfig['translation']['content_type'])
                 }
               >
                 {translationContentTypeOptions.map((option) => (
@@ -321,24 +404,44 @@ export function SetupWizard({
             </label>
           </div>
           <div className="page-actions">
-            <button onClick={() => setStep(1)}>上一步</button>
+            <button onClick={() => setStep(3)}>上一步</button>
             <div className="inline-actions">
               <button disabled={testing} onClick={() => void handleTest()}>
                 {testing ? '测试中…' : '测试连接'}
               </button>
-              <button onClick={() => setStep(3)}>下一步</button>
+              <button onClick={() => setStep(5)}>下一步</button>
             </div>
           </div>
         </div>
       ) : null}
 
-      {step === 3 ? (
+      {step === 5 ? (
         <div className="card">
-          <h2>步骤 3：完成确认</h2>
+          <h2>步骤 5：完成确认</h2>
           <div className="summary-grid">
+            <div className="summary-item">
+              <span>输入目录</span>
+              <strong>{config.file.input_dir || '-'}</strong>
+            </div>
+            <div className="summary-item">
+              <span>输出位置</span>
+              <strong>{outputModeLabel}</strong>
+            </div>
             <div className="summary-item">
               <span>模型</span>
               <strong>{selectedModel || '-'}</strong>
+            </div>
+            <div className="summary-item">
+              <span>源语言</span>
+              <strong>{sourceLanguageLabel}</strong>
+            </div>
+            <div className="summary-item">
+              <span>双语字幕</span>
+              <strong>{config.subtitle.bilingual ? '已开启' : '已关闭'}</strong>
+            </div>
+            <div className="summary-item">
+              <span>双语模式</span>
+              <strong>{config.subtitle.bilingual ? bilingualModeLabel : '-'}</strong>
             </div>
             <div className="summary-item">
               <span>翻译</span>
@@ -354,15 +457,11 @@ export function SetupWizard({
             </div>
             <div className="summary-item">
               <span>内容类型</span>
-              <strong>
-                {config.translation.enabled
-                  ? translationContentTypeOptions.find((option) => option.value === config.translation.content_type)?.label || config.translation.content_type
-                  : '-'}
-              </strong>
+              <strong>{config.translation.enabled ? translationContentTypeLabel : '-'}</strong>
             </div>
           </div>
           <div className="page-actions">
-            <button onClick={() => setStep(2)}>上一步</button>
+            <button onClick={() => setStep(4)}>上一步</button>
             <button disabled={finishing} onClick={() => void completeSetup()}>
               {finishing ? '完成中…' : '完成初始化'}
             </button>

@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
+from functools import lru_cache
+
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def detect_device() -> str:
+    """Auto-detect the best available device (cuda or cpu)."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            logger.info("检测到 CUDA 设备: %s，使用 GPU 加速", name)
+            return "cuda"
+    except ImportError:
+        pass
+    logger.info("未检测到 CUDA，使用 CPU 模式")
+    return "cpu"
+
 
 DEFAULT_CONFIG = {
     "file": {
         "input_dir": "/data",
-        "output_dir": "",
+        "output_to_source_dir": True,
         "allowed_extensions": [".mp4", ".mkv", ".mov", ".avi"],
         "scan_interval_seconds": 5,
         "min_size_mb": 1,
@@ -23,14 +43,13 @@ DEFAULT_CONFIG = {
     },
     "whisper": {
         "model_name": "small",
-        "device": "cpu",
+        "device": "auto",
         "audio_format": "wav",
         "sample_rate": 16000,
-        "align_model": "auto",
     },
     "translation": {
         "enabled": True,
-        "target_languages": ["zh-CN"],
+        "target_languages": ["zh"],
         "max_retries": 2,
         "timeout_seconds": 30,
         "api_base_url": "https://api.openai.com",
@@ -42,25 +61,20 @@ DEFAULT_CONFIG = {
     "subtitle": {
         "bilingual": True,
         "bilingual_mode": "merge",
-        "filename_template": "{stem}.{lang}.srt",
+        "filename_template": "{stem}.forced.{lang}.srt",
         "source_language": "auto",
-        "text_process_style": "basic",
     },
     "mux": {
         "enabled": False,
-        "output_dir": "",
         "filename_template": "{stem}.subbed.mkv",
     },
     "logging": {
-        "page_size": 50,
         "level": "INFO",
     },
 }
 
 SYSTEM_LEVEL_FIELDS = {
     ("whisper", "model_name"),
-    ("whisper", "device"),
-    ("whisper", "align_model"),
 }
 
 RESULT_AFFECTING_GROUPS = {"file", "processing", "whisper", "translation", "subtitle", "mux"}

@@ -14,7 +14,12 @@
       "Bash(npx openspec:*)",
       "Bash([ -d openspec ])",
       "Bash([ -f openspec ])",
-      "Bash(./openspec list:*)"
+      "Bash(./openspec list:*)",
+      "Bash(python -m pytest backend/tests/ -x -q)",
+      "Bash(pip install:*)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(where pytest:*)",
+      "Bash(pip list:*)"
     ],
     "additionalDirectories": [
       "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"

@@ -3,11 +3,14 @@ import { Link } from 'react-router-dom'
 
 import {
   AppConfig,
+  bilingualModeOptions,
   cloneConfig,
   defaultAppConfig,
   getConfig,
   getModels,
   ModelListResponse,
+  retryModeOptions,
+  sourceLanguageOptions,
   testTranslation,
   translationContentTypeOptions,
   updateConfig,
@@ -254,12 +257,21 @@ export function SettingsPage() {
               onChange={(value) => setField('file', 'input_dir', value)}
               placeholder="例如 /data"
             />
-            <DirectoryPicker
-              label="输出目录"
-              value={config.file.output_dir}
-              onChange={(value) => setField('file', 'output_dir', value)}
-              placeholder="留空则输出到源文件目录"
-            />
+            <div className="field-block">
+              <label className="switch-row">
+                <span>输出到源文件目录</span>
+                <input
+                  type="checkbox"
+                  checked={config.file.output_to_source_dir}
+                  onChange={(event) => setField('file', 'output_to_source_dir', event.target.checked)}
+                />
+              </label>
+              <span className="muted">
+                {config.file.output_to_source_dir
+                  ? '开启后，字幕和压片文件会写回源视频所在目录。'
+                  : '关闭后，字幕和压片文件会统一输出到 /output 目录。'}
+              </span>
+            </div>
             <label>
               <span>扫描间隔（秒）</span>
               <input
@@ -303,9 +315,7 @@ export function SettingsPage() {
             </label>
             <label>
               <span>设备</span>
-              <select value={config.whisper.device} onChange={(event) => setField('whisper', 'device', event.target.value)}>
-                <option value="cpu">cpu</option>
-              </select>
+              <input type="text" value={config.whisper.device} readOnly disabled style={{ opacity: 0.7, cursor: 'not-allowed' }} />
             </label>
             <label>
               <span>音频格式</span>
@@ -421,19 +431,35 @@ export function SettingsPage() {
             </label>
             <label>
               <span>双语模式</span>
-              <select value={config.subtitle.bilingual_mode} onChange={(event) => setField('subtitle', 'bilingual_mode', event.target.value)}>
-                <option value="merge">merge</option>
-                <option value="separate">separate</option>
+              <select
+                value={config.subtitle.bilingual_mode}
+                disabled={!config.subtitle.bilingual}
+                onChange={(event) =>
+                  setField('subtitle', 'bilingual_mode', event.target.value as AppConfig['subtitle']['bilingual_mode'])
+                }
+              >
+                {bilingualModeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
               <span>源语言</span>
-              <select value={config.subtitle.source_language} onChange={(event) => setField('subtitle', 'source_language', event.target.value)}>
-                <option value="auto">auto</option>
-                <option value="en">en</option>
-                <option value="zh">zh</option>
-                <option value="ja">ja</option>
+              <select
+                value={config.subtitle.source_language}
+                onChange={(event) =>
+                  setField('subtitle', 'source_language', event.target.value as AppConfig['subtitle']['source_language'])
+                }
+              >
+                {sourceLanguageOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
+              <span className="muted">选错源语言可能影响识别准确度，无法确定时建议保持自动检测。</span>
             </label>
             <div className="field-block">
               <span className="field-label">文件名模板</span>
@@ -452,13 +478,14 @@ export function SettingsPage() {
             </label>
           </div>
           <div className={`field-grid ${config.mux.enabled ? '' : 'disabled-section'}`}>
-            <DirectoryPicker
-              label="压片输出目录"
-              value={config.mux.output_dir}
-              onChange={(value) => setField('mux', 'output_dir', value)}
-              placeholder="留空则输出到源文件目录"
-              disabled={!config.mux.enabled}
-            />
+            <div className="field-block">
+              <span className="field-label">输出位置</span>
+              <span className="muted">
+                {config.file.output_to_source_dir
+                  ? '当前跟随源文件目录输出。'
+                  : '当前统一输出到 /output 目录。'}
+              </span>
+            </div>
             <div className="field-block">
               <span className="field-label">压片文件名模板</span>
               <input
@@ -488,9 +515,15 @@ export function SettingsPage() {
             </label>
             <label>
               <span>自动重试模式</span>
-              <select value={config.processing.retry_mode} onChange={(event) => setField('processing', 'retry_mode', event.target.value as AppConfig['processing']['retry_mode'])}>
-                <option value="restart">restart</option>
-                <option value="resume">resume</option>
+              <select
+                value={config.processing.retry_mode}
+                onChange={(event) => setField('processing', 'retry_mode', event.target.value as AppConfig['processing']['retry_mode'])}
+              >
+                {retryModeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
               </select>
             </label>
             <label>
@@ -516,14 +549,6 @@ export function SettingsPage() {
                 <option value="WARNING">WARNING</option>
                 <option value="ERROR">ERROR</option>
               </select>
-            </label>
-            <label>
-              <span>日志分页大小</span>
-              <input type="number" value={config.logging.page_size} onChange={(event) => setField('logging', 'page_size', Number(event.target.value))} />
-            </label>
-            <label>
-              <span>对齐模型</span>
-              <input value={config.whisper.align_model} onChange={(event) => setField('whisper', 'align_model', event.target.value)} />
             </label>
           </div>
         ) : null}

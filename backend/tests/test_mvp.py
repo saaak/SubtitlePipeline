@@ -32,6 +32,7 @@ from app.pipeline import (
     mux_subtitle,
     parse_chunk_output,
     parse_numbered_lines,
+    run_asr,
     translate_segments,
 )
 from app.runtime import ScannerService, WorkerService
@@ -57,7 +58,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             {
                 "file": {
                     "input_dir": str(self.data_dir),
-                    "output_dir": str(self.output_dir),
+                    "output_to_source_dir": False,
                     "min_size_mb": 0,
                     "allowed_extensions": [".mp4"],
                 },
@@ -86,11 +87,13 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             "SUBPIPELINE_FRONTEND_DIST": os.environ.get("SUBPIPELINE_FRONTEND_DIST"),
             "SUBPIPELINE_MODELS_DIR": os.environ.get("SUBPIPELINE_MODELS_DIR"),
             "SUBPIPELINE_BROWSE_ROOTS": os.environ.get("SUBPIPELINE_BROWSE_ROOTS"),
+            "SUBPIPELINE_OUTPUT_DIR": os.environ.get("SUBPIPELINE_OUTPUT_DIR"),
         }
         os.environ["SUBPIPELINE_DB_PATH"] = str(self.config_dir / "api.db")
         os.environ["SUBPIPELINE_FRONTEND_DIST"] = str(self.frontend_dist)
         os.environ["SUBPIPELINE_MODELS_DIR"] = str(self.models_dir)
         os.environ["SUBPIPELINE_BROWSE_ROOTS"] = ",".join([str(self.data_dir), str(self.output_dir), str(self.config_dir)])
+        os.environ["SUBPIPELINE_OUTPUT_DIR"] = str(self.output_dir)
 
     def tearDown(self) -> None:
         for key, value in self.previous_env.items():
@@ -145,7 +148,31 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
-                VALUES ('file', 'in_place', 'true', 'runtime', 0, 'now')
+                VALUES ('file', 'output_dir', '"/legacy-output"', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('mux', 'output_dir', '""', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('subtitle', 'text_process_style', '"basic"', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('whisper', 'align_model', '"auto"', 'system', 0, 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('logging', 'page_size', '50', 'runtime', 0, 'now')
                 """
             )
         self.database.initialize()
@@ -153,7 +180,13 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertNotIn("provider", config["translation"])
         self.assertNotIn("backend_mode", config["processing"])
         self.assertNotIn("in_place", config["file"])
-        self.assertEqual(config["file"]["output_dir"], "")
+        self.assertNotIn("output_dir", config["file"])
+        self.assertTrue("output_to_source_dir" in config["file"])
+        self.assertFalse(config["file"]["output_to_source_dir"])
+        self.assertNotIn("text_process_style", config["subtitle"])
+        self.assertNotIn("align_model", config["whisper"])
+        self.assertNotIn("output_dir", config["mux"])
+        self.assertNotIn("page_size", config["logging"])
         self.assertEqual(config["processing"]["retry_mode"], "restart")
         self.assertFalse(config["processing"]["keep_intermediates"])
         self.assertIn("mux", config)
@@ -387,7 +420,45 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(task["status"], "done")
         subtitle_path = Path(task["result_payload"]["subtitle_paths"][0])
         self.assertTrue(subtitle_path.exists())
+        self.assertEqual(subtitle_path.parent, self.output_dir)
         self.assertIn("hello world.", subtitle_path.read_text(encoding="utf-8"))
+
+    def test_output_to_source_dir_writes_subtitle_next_to_source_video(self) -> None:
+        self._create_installed_model("small")
+        self.database.update_config({"file": {"output_to_source_dir": True}})
+        video_path = self.data_dir / "source_output.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        scanner = ScannerService(self.database)
+        scanner.scan_once()
+        scanner.scan_once()
+
+        with patch.dict(sys.modules, {"whisperx": self._fake_whisperx()}, clear=False):
+            with patch("app.pipeline.shutil.which", return_value="ffmpeg"), patch("app.pipeline.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="")
+                worker = WorkerService(self.database)
+                self.assertTrue(worker.process_next_task())
+
+        task = self.database.get_task(self.database.list_tasks(page=1, page_size=10).items[0]["id"])
+        self.assertIsNotNone(task)
+        assert task is not None
+        subtitle_path = Path(task["result_payload"]["subtitle_paths"][0])
+        self.assertEqual(subtitle_path.parent, video_path.parent)
+
+    def test_scanner_skips_fixed_output_directory_files(self) -> None:
+        self.database.update_config({"file": {"input_dir": str(self.base), "output_to_source_dir": False}})
+        source_video = self.data_dir / "scan_me.mp4"
+        source_video.write_bytes(b"source-video")
+        generated_output = self.output_dir / "scan_me.subbed.mkv"
+        generated_output.write_bytes(b"mux-output")
+        scanner = ScannerService(self.database)
+
+        self.assertEqual(scanner.scan_once().queued, 0)
+        result = scanner.scan_once()
+
+        self.assertEqual(result.queued, 1)
+        tasks = self.database.list_tasks(page=1, page_size=10).items
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["file_path"], str(source_video))
 
     def test_processed_file_version_is_not_requeued_without_changes(self) -> None:
         video_path = self.data_dir / "stable_once.mp4"
@@ -604,14 +675,14 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertIn("7200", str(mux_error.exception))
 
     def test_whisper_model_cache_reuses_loaded_models(self) -> None:
-        load_model_calls: list[tuple[str, str, str]] = []
+        load_model_calls: list[tuple[str, str, str, str | None]] = []
         load_align_calls: list[tuple[str, str]] = []
 
         class FakeModel:
             pass
 
-        def fake_load_model(name: str, device: str, download_root: str):
-            load_model_calls.append((name, device, download_root))
+        def fake_load_model(name: str, device: str, download_root: str, language: str | None = None):
+            load_model_calls.append((name, device, download_root, language))
             return FakeModel()
 
         def fake_load_align_model(language_code: str, device: str):
@@ -627,13 +698,50 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         with patch.dict(sys.modules, {"whisperx": fake_whisperx}, clear=False):
             first_model = cache.get_model("small", "cpu")
             second_model = cache.get_model("small", "cpu")
+            third_model = cache.get_model("small", "cpu", "ja")
             first_align = cache.get_align_model("en", "cpu")
             second_align = cache.get_align_model("en", "cpu")
 
         self.assertIs(first_model, second_model)
+        self.assertIsNot(first_model, third_model)
         self.assertIs(first_align[0], second_align[0])
-        self.assertEqual(len(load_model_calls), 1)
+        self.assertEqual(len(load_model_calls), 2)
+        self.assertEqual(load_model_calls[1][3], "ja")
         self.assertEqual(len(load_align_calls), 1)
+
+    def test_run_asr_passes_source_language_to_whisper_model(self) -> None:
+        load_model_calls: list[tuple[str, str, str, str | None]] = []
+
+        class FakeModel:
+            def transcribe(self, audio_path: str):
+                return {
+                    "language": "ja",
+                    "segments": [
+                        {"start": 0.0, "end": 1.0, "text": "こんにちは"},
+                    ],
+                }
+
+        fake_whisperx = types.SimpleNamespace(
+            load_model=lambda name, device, download_root, language=None: load_model_calls.append((name, device, download_root, language)) or FakeModel(),
+            load_align_model=lambda language_code, device: (object(), {"language_code": language_code}),
+            align=lambda segments, align_model, metadata, audio_path, device: {"segments": segments},
+        )
+        snapshot = self.database.get_config()
+        snapshot["subtitle"]["source_language"] = "ja"
+        audio_path = self.config_dir / "source-language.wav"
+        audio_path.write_bytes(b"audio")
+        context = TaskContext(
+            task_id=1,
+            file_path=str(self.data_dir / "source-language.mp4"),
+            config_snapshot=snapshot,
+            work_dir=self.config_dir / "work" / "source-language",
+        )
+
+        with patch.dict(sys.modules, {"whisperx": fake_whisperx}, clear=False):
+            result = run_asr(context, audio_path)
+
+        self.assertEqual(result["segments"][0]["text"], "こんにちは")
+        self.assertEqual(load_model_calls[0][3], "ja")
 
     @patch("app.pipeline.OpenAI")
     def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:

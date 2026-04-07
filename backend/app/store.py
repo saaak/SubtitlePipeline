@@ -11,16 +11,25 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config
+from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config, detect_device
 from .pipeline import check_resume_feasibility, cleanup_intermediates, cleanup_work_dir_intermediates
 
 
 OBSOLETE_CONFIG_FIELDS = {
     ("file", "in_place"),
+    ("file", "output_dir"),
     ("processing", "backend_mode"),
     ("translation", "provider"),
     ("translation", "mock_prefix_template"),
     ("translation", "fail_languages"),
+    ("subtitle", "text_process_style"),
+    ("whisper", "align_model"),
+    ("mux", "output_dir"),
+    ("logging", "page_size"),
+}
+
+READ_ONLY_CONFIG_FIELDS = {
+    ("whisper", "device"),
 }
 
 
@@ -30,6 +39,20 @@ def utc_now() -> str:
 
 def normalize_path(value: str) -> str:
     return str(Path(value).expanduser().resolve()).lower()
+
+
+def _load_config_value(connection: sqlite3.Connection, group_name: str, key_name: str) -> Any | None:
+    row = connection.execute(
+        """
+        SELECT value_json
+        FROM system_config
+        WHERE group_name = ? AND key_name = ?
+        """,
+        (group_name, key_name),
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["value_json"])
 
 
 @dataclass
@@ -141,23 +164,32 @@ class Database:
             )
             self._ensure_column(connection, "tasks", "source_size_bytes", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "tasks", "source_mtime", "REAL NOT NULL DEFAULT 0")
-            in_place_row = connection.execute(
-                """
-                SELECT value_json
-                FROM system_config
-                WHERE group_name = 'file' AND key_name = 'in_place'
-                """
-            ).fetchone()
-            if in_place_row and bool(json.loads(in_place_row["value_json"])):
+            now = utc_now()
+            in_place = bool(_load_config_value(connection, "file", "in_place"))
+            legacy_file_output_dir = _load_config_value(connection, "file", "output_dir")
+            legacy_mux_output_dir = _load_config_value(connection, "mux", "output_dir")
+            output_to_source_dir = _load_config_value(connection, "file", "output_to_source_dir")
+            has_legacy_output_fields = any(
+                value is not None
+                for value in (legacy_file_output_dir, legacy_mux_output_dir, _load_config_value(connection, "file", "in_place"))
+            )
+            if output_to_source_dir is None and has_legacy_output_fields:
+                migrated_output_to_source_dir = (
+                    in_place
+                    or (
+                        str(legacy_file_output_dir or "").strip() == ""
+                        and str(legacy_mux_output_dir or "").strip() == ""
+                    )
+                )
                 connection.execute(
                     """
                     INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
-                    VALUES ('file', 'output_dir', '""', 'runtime', 0, ?)
+                    VALUES ('file', 'output_to_source_dir', ?, 'runtime', 0, ?)
                     ON CONFLICT(group_name, key_name)
                     DO UPDATE SET value_json = excluded.value_json,
                                   updated_at = excluded.updated_at
                     """,
-                    (utc_now(),),
+                    (json.dumps(migrated_output_to_source_dir), now),
                 )
             connection.execute(
                 """
@@ -174,7 +206,6 @@ class Database:
                 list(OBSOLETE_CONFIG_FIELDS),
             )
             defaults = copy_default_config()
-            now = utc_now()
             for group_name, group_values in defaults.items():
                 for key_name, value in group_values.items():
                     scope = "system" if (group_name, key_name) in SYSTEM_LEVEL_FIELDS else "runtime"
@@ -231,6 +262,8 @@ class Database:
             if row["group_name"] == "system":
                 continue
             defaults.setdefault(row["group_name"], {})[row["key_name"]] = json.loads(row["value_json"])
+        if defaults.get("whisper", {}).get("device") == "auto":
+            defaults["whisper"]["device"] = detect_device()
         defaults["meta"] = {"restart_required": restart_required}
         return defaults
 
@@ -243,6 +276,8 @@ class Database:
                 if not isinstance(group_values, dict):
                     continue
                 for key_name, value in group_values.items():
+                    if (group_name, key_name) in READ_ONLY_CONFIG_FIELDS:
+                        continue
                     if group_name not in current or key_name not in current[group_name]:
                         raise KeyError(f"unknown config field: {group_name}.{key_name}")
                     scope = "system" if (group_name, key_name) in SYSTEM_LEVEL_FIELDS else "runtime"

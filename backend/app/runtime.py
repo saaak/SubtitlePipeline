@@ -49,6 +49,24 @@ def _mux_output_suffix(config: dict) -> str:
     return suffix if suffix else ""
 
 
+def _is_inside_directory(path: Path, directory: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(directory.resolve())
+    except OSError:
+        return False
+
+
+def _should_skip_scan_path(path: Path, config: dict[str, Any]) -> bool:
+    if ".subpipeline" in path.parts:
+        return True
+    if not bool(config.get("file", {}).get("output_to_source_dir", True)):
+        output_dir = Path(os.environ.get("SUBPIPELINE_OUTPUT_DIR", "/output"))
+        if _is_inside_directory(path, output_dir):
+            return True
+    mux_suffix = _mux_output_suffix(config)
+    return bool(mux_suffix and path.name.endswith(mux_suffix))
+
+
 @dataclass
 class ScanResult:
     scanned: int
@@ -75,7 +93,6 @@ class ScannerService:
         max_pending_tasks = max(int(scanner_config.get("max_pending_tasks", 5)), 0)
         pending_count = self.database.count_tasks_by_status("pending")
         remaining_slots = max(max_pending_tasks - pending_count, 0)
-        mux_suffix = _mux_output_suffix(config)
         scanned = 0
         queued = 0
         skipped = 0
@@ -108,11 +125,9 @@ class ScannerService:
         all_files.sort(key=_sort_key)
 
         for path in all_files:
-            if ".subpipeline" in path.parts:
+            if _should_skip_scan_path(path, config):
                 continue
             if path.suffix.lower() not in allowed:
-                continue
-            if mux_suffix and path.name.endswith(mux_suffix):
                 continue
             scanned += 1
             stat = path.stat()
