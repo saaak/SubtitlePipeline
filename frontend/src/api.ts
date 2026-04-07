@@ -25,6 +25,7 @@ export type TaskListResponse = {
   total: number
   page: number
   page_size: number
+  status_counts: Record<string, number>
 }
 
 export type LogItem = {
@@ -57,6 +58,9 @@ export type AppConfig = {
     keep_intermediates: boolean
     poll_interval_seconds: number
     work_dir: string
+  }
+  scanner: {
+    max_pending_tasks: number
   }
   whisper: {
     model_name: string
@@ -187,6 +191,9 @@ export const defaultAppConfig: AppConfig = {
     poll_interval_seconds: 2,
     work_dir: '/config/work',
   },
+  scanner: {
+    max_pending_tasks: 5,
+  },
   whisper: {
     model_name: 'small',
     device: 'cpu',
@@ -258,8 +265,15 @@ export function cloneConfig(config: AppConfig): AppConfig {
   return structuredClone(config)
 }
 
-export function getTasks(): Promise<TaskListResponse> {
-  return request<TaskListResponse>('/api/tasks?page=1&page_size=20')
+export function getTasks(status?: string, page = 1, pageSize = 20): Promise<TaskListResponse> {
+  const params = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  })
+  if (status) {
+    params.set('status', status)
+  }
+  return request<TaskListResponse>(`/api/tasks?${params.toString()}`)
 }
 
 export function getTask(taskId: string): Promise<Task> {

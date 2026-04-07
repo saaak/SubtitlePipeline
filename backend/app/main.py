@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .logging_utils import setup_logging
 from .model_manager import ModelManager
 from .pipeline import PipelineError, check_resume_feasibility, get_translation_provider
 from .runtime import ScannerService, WorkerService
@@ -20,6 +21,7 @@ from .store import Database
 class ConfigUpdateRequest(BaseModel):
     file: dict[str, Any] | None = None
     processing: dict[str, Any] | None = None
+    scanner: dict[str, Any] | None = None
     whisper: dict[str, Any] | None = None
     translation: dict[str, Any] | None = None
     subtitle: dict[str, Any] | None = None
@@ -111,9 +113,11 @@ def resolve_browse_target(raw_path: str | None) -> tuple[Path, list[Path]]:
 async def lifespan(app: FastAPI):
     database = Database(resolve_db_path())
     database.initialize()
+    setup_logging(database)
     app.state.database = database
     app.state.model_manager = ModelManager(resolve_models_dir())
     yield
+    database.close()
 
 
 def get_database(app: FastAPI) -> Database:
@@ -151,6 +155,7 @@ def create_app() -> FastAPI:
             "page": result.page,
             "page_size": result.page_size,
             "total": result.total,
+            "status_counts": result.status_counts,
         }
 
     @app.get("/api/tasks/{task_id}")

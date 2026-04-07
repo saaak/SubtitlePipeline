@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -21,10 +22,14 @@ from app.model_manager import ModelManager
 from app.pipeline import (
     FORMAT_INSTRUCTION,
     TRANSLATION_PRESETS,
+    PipelineError,
     TaskContext,
+    WhisperModelCache,
     build_chunk_user_message,
     build_chunks,
     debug_translation_request,
+    extract_audio,
+    mux_subtitle,
     parse_chunk_output,
     parse_numbered_lines,
     translate_segments,
@@ -117,6 +122,18 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             align=lambda segments, align_model, metadata, audio_path, device: {"segments": segments},
         )
 
+    def _stream_chunks(self, content: str):
+        return [
+            types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        delta=types.SimpleNamespace(content=content),
+                        finish_reason="stop",
+                    )
+                ]
+            )
+        ]
+
     def test_database_filters_obsolete_fields_and_tracks_setup_status(self) -> None:
         with self.database.connect() as connection:
             connection.execute(
@@ -165,10 +182,8 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
     @patch("app.pipeline.OpenAI")
     def test_api_endpoints_cover_system_status_translation_and_models(self, mock_openai: MagicMock) -> None:
         self._create_installed_model("small")
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content='["测试成功"]'))]
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_completion
+        mock_client.chat.completions.create.return_value = self._stream_chunks("0|测试成功")
         mock_openai.return_value = mock_client
 
         app = create_app()
@@ -214,6 +229,34 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             browse_response = client.get("/api/browse", params={"path": str(self.data_dir)})
             self.assertEqual(browse_response.status_code, 200)
             self.assertEqual(browse_response.json()["current"], str(self.data_dir.resolve()))
+
+    def test_api_tasks_includes_status_counts(self) -> None:
+        statuses = ["pending", "processing", "failed", "done", "cancelled"]
+        for index, status in enumerate(statuses, start=1):
+            video_path = self.data_dir / f"task-{index}.mp4"
+            video_path.write_bytes(f"video-{index}".encode())
+            observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
+            task = self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
+            with self.database.connect() as connection:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, stage = ?, updated_at = ?, finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, status, f"now-{index}", f"now-{index}" if status in {"failed", "done", "cancelled"} else None, task["id"]),
+                )
+
+        app = create_app()
+        with TestClient(app) as client:
+            response = client.get("/api/tasks")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["status_counts"]["pending"], 1)
+            self.assertEqual(payload["status_counts"]["processing"], 1)
+            self.assertEqual(payload["status_counts"]["failed"], 1)
+            self.assertEqual(payload["status_counts"]["done"], 1)
+            self.assertEqual(payload["status_counts"]["cancelled"], 1)
 
     def test_resume_retry_modes_and_resume_check(self) -> None:
         video_path = self.data_dir / "resume_demo.mp4"
@@ -359,6 +402,22 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(third_scan.queued, 0)
         self.assertEqual(len(self.database.list_tasks(page=1, page_size=10).items), 1)
 
+    def test_scanner_throttling_blocks_new_tasks_when_pending_queue_is_full(self) -> None:
+        for index in range(5):
+            video_path = self.data_dir / f"pending-{index}.mp4"
+            video_path.write_bytes(f"video-{index}".encode())
+            observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
+            self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
+
+        blocked_video = self.data_dir / "blocked.mp4"
+        blocked_video.write_bytes(b"blocked-video")
+        scanner = ScannerService(self.database)
+        result = scanner.scan_once()
+
+        self.assertEqual(result.queued, 0)
+        self.assertTrue(result.throttled)
+        self.assertEqual(self.database.count_tasks_by_status("pending"), 5)
+
     def test_changed_file_version_is_requeued(self) -> None:
         video_path = self.data_dir / "updated.mp4"
         video_path.write_bytes(b"version-one")
@@ -431,6 +490,35 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         assert frozen_task is not None
         self.assertEqual(frozen_task["config_snapshot"]["translation"]["target_languages"], ["zh-CN"])
 
+    def test_persistent_database_reuses_single_connection(self) -> None:
+        persistent_database = Database(str(self.config_dir / "persistent.db"), persistent=True)
+        persistent_database.initialize()
+
+        with persistent_database.connect() as first_connection:
+            first_id = id(first_connection)
+            first_connection.execute(
+                """
+                INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('runtime-test', 'value', '"ok"', 'runtime', 0, 'now')
+                ON CONFLICT(group_name, key_name)
+                DO UPDATE SET value_json = excluded.value_json
+                """
+            )
+        with persistent_database.connect() as second_connection:
+            self.assertEqual(first_id, id(second_connection))
+            row = second_connection.execute(
+                """
+                SELECT value_json
+                FROM system_config
+                WHERE group_name = 'runtime-test' AND key_name = 'value'
+                """
+            ).fetchone()
+        self.assertIsNotNone(persistent_database._conn)
+        self.assertEqual(id(persistent_database._conn), first_id)
+        self.assertEqual(row["value_json"], '"ok"')
+        persistent_database.close()
+        self.assertIsNone(persistent_database._conn)
+
     def test_build_chunks_and_boundaries(self) -> None:
         segments = [{"start": float(index), "end": float(index + 1), "text": f"line {index}"} for index in range(120)]
         chunks = build_chunks(segments, chunk_size=50, context_size=10)
@@ -471,8 +559,8 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             ["你好", "世界"],
         )
         self.assertEqual(
-            parse_numbered_lines("0|你好\n2|忽略\n3|也忽略\n4|再忽略\n5|再忽略", [0, 1, 2, 3, 4], ["a", "b", "c", "d", "e"]),
-            ["你好", "b", "忽略", "也忽略", "再忽略"],
+            parse_numbered_lines("0|你好\n1|世界\n2|忽略\n3|也忽略\n5|再忽略", [0, 1, 2, 3, 4], ["a", "b", "c", "d", "e"]),
+            ["你好", "世界", "忽略", "也忽略", "e"],
         )
         self.assertIsNone(parse_numbered_lines("0|你好", [0, 1, 2], ["a", "b", "c"]))
 
@@ -489,6 +577,63 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             parse_chunk_output("你好\n世界", [0, 1], ["hello", "world"]),
             ["你好", "世界"],
         )
+
+    def test_ffmpeg_timeout_raises_pipeline_error(self) -> None:
+        snapshot = self.database.get_config()
+        snapshot["translation"]["enabled"] = False
+        context = TaskContext(
+            task_id=1,
+            file_path=str(self.data_dir / "timeout.mp4"),
+            config_snapshot=snapshot,
+            work_dir=self.config_dir / "work" / "timeout",
+        )
+        Path(context.file_path).write_bytes(b"timeout-video")
+        subtitle_path = self.output_dir / "timeout.zh-CN.srt"
+        subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+        with patch("app.pipeline.shutil.which", return_value="ffmpeg"), patch(
+            "app.pipeline.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd=["ffmpeg"], timeout=7200),
+        ):
+            with self.assertRaises(PipelineError) as extract_error:
+                extract_audio(context)
+            self.assertIn("7200", str(extract_error.exception))
+
+            with self.assertRaises(PipelineError) as mux_error:
+                mux_subtitle(context, [str(subtitle_path)])
+            self.assertIn("7200", str(mux_error.exception))
+
+    def test_whisper_model_cache_reuses_loaded_models(self) -> None:
+        load_model_calls: list[tuple[str, str, str]] = []
+        load_align_calls: list[tuple[str, str]] = []
+
+        class FakeModel:
+            pass
+
+        def fake_load_model(name: str, device: str, download_root: str):
+            load_model_calls.append((name, device, download_root))
+            return FakeModel()
+
+        def fake_load_align_model(language_code: str, device: str):
+            load_align_calls.append((language_code, device))
+            return (object(), {"language_code": language_code})
+
+        fake_whisperx = types.SimpleNamespace(
+            load_model=fake_load_model,
+            load_align_model=fake_load_align_model,
+        )
+
+        cache = WhisperModelCache()
+        with patch.dict(sys.modules, {"whisperx": fake_whisperx}, clear=False):
+            first_model = cache.get_model("small", "cpu")
+            second_model = cache.get_model("small", "cpu")
+            first_align = cache.get_align_model("en", "cpu")
+            second_align = cache.get_align_model("en", "cpu")
+
+        self.assertIs(first_model, second_model)
+        self.assertIs(first_align[0], second_align[0])
+        self.assertEqual(len(load_model_calls), 1)
+        self.assertEqual(len(load_align_calls), 1)
 
     @patch("app.pipeline.OpenAI")
     def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:
@@ -520,7 +665,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
                 f"{prefix}|ZH-{text}"
                 for prefix, text in (line.split("|", 1) for line in lines)
             )
-            return MagicMock(choices=[MagicMock(message=MagicMock(content=content))])
+            return self._stream_chunks(content)
 
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = fake_create
@@ -558,15 +703,13 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(len(translations["zh-CN"]), 60)
         self.assertEqual(translations["zh-CN"][0], "ZH-line 0")
         self.assertEqual(translations["zh-CN"][-1], "ZH-line 59")
-        self.assertEqual(progress_events[-1], (2, 2))
-        self.assertEqual(mock_client.chat.completions.create.call_count, 2)
+        self.assertEqual(progress_events[-1], (4, 4))
+        self.assertEqual(mock_client.chat.completions.create.call_count, 4)
 
     @patch("app.pipeline.OpenAI")
     def test_openai_compatible_translation_provider(self, mock_openai: MagicMock) -> None:
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content='["你好", "世界"]'))]
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_completion
+        mock_client.chat.completions.create.return_value = self._stream_chunks('["你好", "世界"]')
         mock_openai.return_value = mock_client
 
         snapshot = self.database.get_config()
@@ -596,10 +739,8 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
     @patch("app.pipeline.OpenAI")
     def test_translation_debug_and_fenced_json_response(self, mock_openai: MagicMock) -> None:
-        mock_completion = MagicMock()
-        mock_completion.choices = [MagicMock(message=MagicMock(content='```json\n["你好，世界。", "第二行。"]\n```'))]
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_completion
+        mock_client.chat.completions.create.return_value = self._stream_chunks('```json\n["你好，世界。", "第二行。"]\n```')
         mock_openai.return_value = mock_client
 
         result = debug_translation_request(

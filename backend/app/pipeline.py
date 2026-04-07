@@ -67,6 +67,55 @@ class TaskContext:
     using_fallback_intermediates: bool = False
 
 
+class WhisperModelCache:
+    def __init__(self) -> None:
+        self._model: Any | None = None
+        self._model_name: str | None = None
+        self._model_device: str | None = None
+        self._align_model: Any | None = None
+        self._align_metadata: Any | None = None
+        self._align_language: str | None = None
+        self._align_device: str | None = None
+
+    def get_model(self, name: str, device: str) -> Any:
+        if self._model is not None and self._model_name == name and self._model_device == device:
+            return self._model
+        try:
+            import whisperx  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
+        models_root = Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
+        local_model_dir = models_root / name
+        model_reference = str(local_model_dir) if local_model_dir.exists() else name
+        self._model = whisperx.load_model(
+            model_reference,
+            device,
+            download_root=str(models_root),
+        )
+        self._model_name = name
+        self._model_device = device
+        return self._model
+
+    def get_align_model(self, language: str, device: str) -> tuple[Any, Any]:
+        if (
+            self._align_model is not None
+            and self._align_language == language
+            and self._align_device == device
+        ):
+            return self._align_model, self._align_metadata
+        try:
+            import whisperx  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
+        self._align_model, self._align_metadata = whisperx.load_align_model(
+            language_code=language,
+            device=device,
+        )
+        self._align_language = language
+        self._align_device = device
+        return self._align_model, self._align_metadata
+
+
 @dataclass(frozen=True)
 class ChunkLine:
     index: int
@@ -623,6 +672,16 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _run_ffmpeg(command: list[str], timeout_message: str, failure_message: str) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=7200)
+    except subprocess.TimeoutExpired as exc:
+        raise PipelineError(timeout_message) from exc
+    if result.returncode != 0:
+        raise PipelineError(result.stderr.strip() or failure_message)
+    return result
+
+
 def extract_audio(context: TaskContext) -> Path:
     whisper_config = context.config_snapshot["whisper"]
     source_path = Path(context.file_path)
@@ -644,9 +703,7 @@ def extract_audio(context: TaskContext) -> Path:
         str(whisper_config["sample_rate"]),
         str(audio_path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise PipelineError(result.stderr.strip() or "ffmpeg 执行失败")
+    _run_ffmpeg(command, "音频提取超时，FFmpeg 执行超过 7200 秒", "ffmpeg 执行失败")
     return audio_path
 
 
@@ -666,25 +723,16 @@ def load_asr_result(context: TaskContext) -> dict[str, Any]:
     return payload
 
 
-def run_asr(context: TaskContext, audio_path: Path) -> dict[str, Any]:
+def run_asr(context: TaskContext, audio_path: Path, model_cache: WhisperModelCache | None = None) -> dict[str, Any]:
+    whisper_config = context.config_snapshot["whisper"]
+    cache = model_cache or WhisperModelCache()
     try:
         import whisperx  # type: ignore
     except ImportError as exc:
         raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-    whisper_config = context.config_snapshot["whisper"]
-    models_root = Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
-    local_model_dir = models_root / str(whisper_config["model_name"])
-    model_reference = str(local_model_dir) if local_model_dir.exists() else whisper_config["model_name"]
-    model = whisperx.load_model(
-        model_reference,
-        whisper_config["device"],
-        download_root=str(models_root),
-    )
+    model = cache.get_model(str(whisper_config["model_name"]), str(whisper_config["device"]))
     result = model.transcribe(str(audio_path))
-    align_model, metadata = whisperx.load_align_model(
-        language_code=result.get("language", "en"),
-        device=whisper_config["device"],
-    )
+    align_model, metadata = cache.get_align_model(str(result.get("language", "en")), str(whisper_config["device"]))
     aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), whisper_config["device"])
     return {
         "segments": [
@@ -991,9 +1039,7 @@ def mux_subtitle(context: TaskContext, subtitle_paths: list[str]) -> str:
         )
     output_path = _resolve_mux_output_path(context)
     command.append(str(output_path))
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise PipelineError(result.stderr.strip() or "ffmpeg 字幕封装失败")
+    _run_ffmpeg(command, "字幕封装超时，FFmpeg 执行超过 7200 秒", "ffmpeg 字幕封装失败")
     return str(output_path)
 
 

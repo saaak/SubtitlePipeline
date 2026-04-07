@@ -129,6 +129,12 @@ select {
   color: #64748b;
 }
 
+.task-toolbar,
+.tab-row {
+  display: grid;
+  gap: 12px;
+}
+
 .card {
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(10px);
@@ -180,6 +186,35 @@ select {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.task-toolbar {
+  margin-bottom: 16px;
+}
+
+.tab-row {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.tab-button,
+.page-button {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.tab-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tab-button.active,
+.page-button.active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
 }
 
 .actions-cell.wrap,

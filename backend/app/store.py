@@ -38,24 +38,41 @@ class PageResult:
     page: int
     page_size: int
     total: int
+    status_counts: dict[str, int]
 
 
 class Database:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, persistent: bool = False):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.persistent = persistent
+        self._conn = self._create_connection() if persistent else None
 
-    @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _create_connection(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        if self._conn is not None:
+            yield self._conn
+            self._conn.commit()
+            return
+        connection = self._create_connection()
         try:
             yield connection
             connection.commit()
         finally:
             connection.close()
+
+    def close(self) -> None:
+        if self._conn is None:
+            return
+        self._conn.close()
+        self._conn = None
 
     def initialize(self) -> None:
         with self.connect() as connection:
@@ -331,6 +348,13 @@ class Database:
                 f"SELECT COUNT(*) FROM tasks {where_clause}",
                 filters,
             ).fetchone()[0]
+            status_rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM tasks
+                GROUP BY status
+                """
+            ).fetchall()
             rows = connection.execute(
                 f"""
                 SELECT id, file_path, status, stage, progress, retry_count, max_retries, cancel_requested,
@@ -342,7 +366,36 @@ class Database:
                 """,
                 [*filters, page_size, offset],
             ).fetchall()
-        return PageResult([dict(row) for row in rows], page, page_size, total)
+        return PageResult(
+            [dict(row) for row in rows],
+            page,
+            page_size,
+            total,
+            {str(row["status"]): int(row["count"]) for row in status_rows},
+        )
+
+    def count_tasks_by_status(self, status: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE status = ?
+                """,
+                (status,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def status_counts(self) -> dict[str, int]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM tasks
+                GROUP BY status
+                """
+            ).fetchall()
+        return {str(row["status"]): int(row["count"]) for row in rows}
 
     def get_task(self, task_id: int) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -386,7 +439,7 @@ class Database:
             item["details"] = json.loads(item["details_json"]) if item["details_json"] else None
             item.pop("details_json", None)
             items.append(item)
-        return PageResult(items, page, page_size, total)
+        return PageResult(items, page, page_size, total, {})
 
     def log(self, task_id: int, stage: str, level: str, message: str, details: dict[str, Any] | None = None) -> None:
         with self.connect() as connection:

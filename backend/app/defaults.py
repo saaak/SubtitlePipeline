@@ -18,6 +18,9 @@ DEFAULT_CONFIG = {
         "poll_interval_seconds": 2,
         "work_dir": "/config/work",
     },
+    "scanner": {
+        "max_pending_tasks": 5,
+    },
     "whisper": {
         "model_name": "small",
         "device": "cpu",

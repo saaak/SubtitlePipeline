@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -30,11 +31,13 @@ from .pipeline import (
     save_translations,
     translate_segments,
     write_stage_artifacts,
+    WhisperModelCache,
 )
 from .store import Database
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".m4v"}
+logger = logging.getLogger(__name__)
 
 
 def _mux_output_suffix(config: dict) -> str:
@@ -51,6 +54,9 @@ class ScanResult:
     scanned: int
     queued: int
     skipped: int
+    pending_count: int
+    remaining_slots: int
+    throttled: bool
 
 
 class ScannerService:
@@ -60,15 +66,28 @@ class ScannerService:
     def scan_once(self) -> ScanResult:
         config = self.database.get_config()
         file_config = config["file"]
+        scanner_config = config.get("scanner", {})
         input_dir = Path(file_config["input_dir"])
         input_dir.mkdir(parents=True, exist_ok=True)
         allowed = {extension.lower() for extension in file_config.get("allowed_extensions", [])} or VIDEO_EXTENSIONS
         min_size_bytes = int(file_config["min_size_mb"]) * 1024 * 1024
         max_size_bytes = int(file_config["max_size_mb"]) * 1024 * 1024
+        max_pending_tasks = max(int(scanner_config.get("max_pending_tasks", 5)), 0)
+        pending_count = self.database.count_tasks_by_status("pending")
+        remaining_slots = max(max_pending_tasks - pending_count, 0)
         mux_suffix = _mux_output_suffix(config)
         scanned = 0
         queued = 0
         skipped = 0
+        if remaining_slots <= 0:
+            return ScanResult(
+                scanned=scanned,
+                queued=queued,
+                skipped=skipped,
+                pending_count=pending_count,
+                remaining_slots=remaining_slots,
+                throttled=True,
+            )
         # 收集所有文件，按文件夹创建时间（新→旧）和路径深度（外→内）排序
         all_files = [p for p in input_dir.rglob("*") if p.is_file()]
 
@@ -121,11 +140,30 @@ class ScannerService:
                 observed["mtime"],
             )
             queued += 1
-        return ScanResult(scanned=scanned, queued=queued, skipped=skipped)
+            remaining_slots -= 1
+            if remaining_slots <= 0:
+                break
+        return ScanResult(
+            scanned=scanned,
+            queued=queued,
+            skipped=skipped,
+            pending_count=pending_count,
+            remaining_slots=remaining_slots,
+            throttled=queued == 0 and pending_count >= max_pending_tasks,
+        )
 
     def run_forever(self) -> None:
         while True:
-            self.scan_once()
+            result = self.scan_once()
+            logger.info(
+                "扫描完成 scanned=%d queued=%d skipped=%d pending=%d slots=%d throttled=%s",
+                result.scanned,
+                result.queued,
+                result.skipped,
+                result.pending_count,
+                result.remaining_slots,
+                result.throttled,
+            )
             interval = int(self.database.get_config()["file"]["scan_interval_seconds"])
             time.sleep(max(interval, 1))
 
@@ -133,6 +171,7 @@ class ScannerService:
 class WorkerService:
     def __init__(self, database: Database):
         self.database = database
+        self.model_cache = WhisperModelCache()
 
     def run_forever(self) -> None:
         while True:
@@ -203,7 +242,7 @@ class WorkerService:
         if start_stage in {"queued", "extract_audio", "asr"}:
             if audio_path is None:
                 raise PipelineError("缺少音频文件，无法执行 ASR")
-            asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path))
+            asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path, self.model_cache))
             save_asr_result(context, asr_result)
         if start_stage in {"queued", "extract_audio", "asr", "text_process"}:
             if asr_result is None:
