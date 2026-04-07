@@ -11,7 +11,10 @@
       "Bash(python -c \"from app.pipeline import *; print\\('All imports OK'\\)\")",
       "Bash(python -c \"from app.pipeline import build_chunks, parse_numbered_lines_ordered, parse_chunk_output, ParseResult, CHUNK_SIZE, CONTEXT_SIZE, MAX_PARTIAL_RETRIES; print\\(f'CHUNK_SIZE={CHUNK_SIZE}, CONTEXT_SIZE={CONTEXT_SIZE}, MAX_PARTIAL_RETRIES={MAX_PARTIAL_RETRIES}'\\); r = parse_numbered_lines_ordered\\('0|hello\\\\n1|world\\\\n3|test', [0,1,2,3]\\); print\\(f'matched={r.matched}, first_failed={r.first_failed_position}'\\)\")",
       "Bash(npx tsc:*)",
-      "Bash(npx openspec:*)"
+      "Bash(npx openspec:*)",
+      "Bash([ -d openspec ])",
+      "Bash([ -f openspec ])",
+      "Bash(./openspec list:*)"
     ],
     "additionalDirectories": [
       "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"
