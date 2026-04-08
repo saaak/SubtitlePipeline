@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -34,7 +34,7 @@ READ_ONLY_CONFIG_FIELDS = {
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def normalize_path(value: str) -> str:
