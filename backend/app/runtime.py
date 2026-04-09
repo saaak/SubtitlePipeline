@@ -84,27 +84,15 @@ class ScannerService:
     def scan_once(self) -> ScanResult:
         config = self.database.get_config()
         file_config = config["file"]
-        scanner_config = config.get("scanner", {})
         input_dir = Path(file_config["input_dir"])
         input_dir.mkdir(parents=True, exist_ok=True)
         allowed = {extension.lower() for extension in file_config.get("allowed_extensions", [])} or VIDEO_EXTENSIONS
         min_size_bytes = int(file_config["min_size_mb"]) * 1024 * 1024
         max_size_bytes = int(file_config["max_size_mb"]) * 1024 * 1024
-        max_pending_tasks = max(int(scanner_config.get("max_pending_tasks", 5)), 0)
         pending_count = self.database.count_tasks_by_status("pending")
-        remaining_slots = max(max_pending_tasks - pending_count, 0)
         scanned = 0
         queued = 0
         skipped = 0
-        if remaining_slots <= 0:
-            return ScanResult(
-                scanned=scanned,
-                queued=queued,
-                skipped=skipped,
-                pending_count=pending_count,
-                remaining_slots=remaining_slots,
-                throttled=True,
-            )
         # 收集所有文件，按文件夹创建时间（新→旧）和路径深度（外→内）排序
         all_files = [p for p in input_dir.rglob("*") if p.is_file()]
 
@@ -148,23 +136,22 @@ class ScannerService:
             if self.database.has_active_task(observed["path_key"]):
                 skipped += 1
                 continue
+            parent_dir_ctime = _dir_ctime(str(path.parent))
             self.database.create_task(
                 observed["file_id"],
                 observed["path"],
                 observed["size_bytes"],
                 observed["mtime"],
+                parent_dir_ctime,
             )
             queued += 1
-            remaining_slots -= 1
-            if remaining_slots <= 0:
-                break
         return ScanResult(
             scanned=scanned,
             queued=queued,
             skipped=skipped,
             pending_count=pending_count,
-            remaining_slots=remaining_slots,
-            throttled=queued == 0 and pending_count >= max_pending_tasks,
+            remaining_slots=0,
+            throttled=False,
         )
 
     def run_forever(self) -> None:

@@ -133,6 +133,7 @@ class Database:
                     updated_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
+                    parent_dir_ctime REAL NOT NULL DEFAULT 0,
                     FOREIGN KEY(file_id) REFERENCES files(id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_status_created_at ON tasks(status, created_at);
@@ -164,6 +165,7 @@ class Database:
             )
             self._ensure_column(connection, "tasks", "source_size_bytes", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "tasks", "source_mtime", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "tasks", "parent_dir_ctime", "REAL NOT NULL DEFAULT 0")
             now = utc_now()
             in_place = bool(_load_config_value(connection, "file", "in_place"))
             legacy_file_output_dir = _load_config_value(connection, "file", "output_dir")
@@ -380,6 +382,11 @@ class Database:
         if status:
             where_clause = "WHERE status = ?"
             filters.append(status)
+        # 已完成/失败按更新时间排序，其余按文件夹创建时间排序
+        if status in ("done", "failed"):
+            order_clause = "ORDER BY updated_at DESC, id DESC"
+        else:
+            order_clause = "ORDER BY parent_dir_ctime DESC, id DESC"
         with self.connect() as connection:
             total = connection.execute(
                 f"SELECT COUNT(*) FROM tasks {where_clause}",
@@ -398,7 +405,7 @@ class Database:
                        restart_required, error_message, created_at, updated_at, started_at, finished_at
                 FROM tasks
                 {where_clause}
-                ORDER BY updated_at DESC, id DESC
+                {order_clause}
                 LIMIT ? OFFSET ?
                 """,
                 [*filters, page_size, offset],
@@ -610,7 +617,7 @@ class Database:
             ).fetchone()
         return row is not None
 
-    def create_task(self, file_id: int, file_path: str, size_bytes: int, mtime: float) -> dict[str, Any]:
+    def create_task(self, file_id: int, file_path: str, size_bytes: int, mtime: float, parent_dir_ctime: float = 0.0) -> dict[str, Any]:
         config = self.get_config()
         now = utc_now()
         with self.connect() as connection:
@@ -619,9 +626,9 @@ class Database:
                 INSERT INTO tasks (
                     file_id, file_path, file_path_key, source_size_bytes, source_mtime,
                     status, stage, progress, retry_count, max_retries,
-                    cancel_requested, restart_required, created_at, updated_at
+                    cancel_requested, restart_required, parent_dir_ctime, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', 'queued', 0, 0, ?, 0, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'pending', 'queued', 0, 0, ?, 0, ?, ?, ?, ?)
                 """,
                 (
                     file_id,
@@ -631,6 +638,7 @@ class Database:
                     mtime,
                     int(config["processing"]["max_retries"]),
                     1 if config["meta"]["restart_required"] else 0,
+                    parent_dir_ctime,
                     now,
                     now,
                 ),
@@ -652,7 +660,7 @@ class Database:
                 SELECT id, file_path, retry_count, max_retries, stage, progress
                 FROM tasks
                 WHERE status = 'pending'
-                ORDER BY created_at ASC, id ASC
+                ORDER BY parent_dir_ctime DESC, id ASC
                 LIMIT 1
                 """
             ).fetchone()
