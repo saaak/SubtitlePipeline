@@ -464,7 +464,7 @@ export function SettingsPage() {
             <div className="field-block">
               <span className="field-label">文件名模板</span>
               <input value={config.subtitle.filename_template} onChange={(event) => setField('subtitle', 'filename_template', event.target.value)} />
-              <span className="muted">{'可用占位符：{stem} = 源文件名（不含扩展名），{lang} = 语言代码（如 zh-CN）或 bilingual / source'}</span>
+              <span className="muted">{'可用占位符：{stem} = 源文件名（不含扩展名），{lang} = 语言代码（为你在翻译配置中填写的语言）或 bilingual / source'}</span>
             </div>
           </div>
         </div>
