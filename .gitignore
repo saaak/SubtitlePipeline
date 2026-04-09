@@ -1,6 +1,7 @@
 node_modules/
 frontend/node_modules/
 frontend/dist/
+openspec/
 
 __pycache__/
 **/__pycache__/
