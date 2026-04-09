@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import {
@@ -20,6 +20,7 @@ import {
   updateConfig,
 } from '../api'
 import { DirectoryPicker } from '../components/DirectoryPicker'
+import { usePolling } from '../hooks'
 
 type GroupName = 'file' | 'translation' | 'subtitle'
 
@@ -68,6 +69,19 @@ export function SetupWizard({
       setLoading(false)
     }
   }
+
+  const isDownloading = models.items.some((item) => item.status === 'downloading')
+
+  const pollModels = useCallback(async () => {
+    try {
+      const nextModels = await getModels()
+      setModels(nextModels)
+    } catch {
+      // ignore polling errors
+    }
+  }, [])
+
+  usePolling(pollModels, 2000, [step, isDownloading], step === 2 && isDownloading)
 
   useEffect(() => {
     void load()

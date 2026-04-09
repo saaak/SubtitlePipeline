@@ -28,8 +28,8 @@ DEFAULT_CONFIG = {
         "output_to_source_dir": True,
         "allowed_extensions": [".mp4", ".mkv", ".mov", ".avi"],
         "scan_interval_seconds": 5,
-        "min_size_mb": 1,
-        "max_size_mb": 4096,
+        "min_size_mb": 128,
+        "max_size_mb": 8192,
     },
     "processing": {
         "max_retries": 1,
