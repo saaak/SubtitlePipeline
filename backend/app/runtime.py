@@ -169,6 +169,10 @@ class ScannerService:
 
     def run_forever(self) -> None:
         while True:
+            if not self.database.is_setup_complete():
+                interval = int(self.database.get_config()["file"]["scan_interval_seconds"])
+                time.sleep(max(interval, 1))
+                continue
             result = self.scan_once()
             logger.info(
                 "扫描完成 scanned=%d queued=%d skipped=%d pending=%d slots=%d throttled=%s",
@@ -190,6 +194,10 @@ class WorkerService:
 
     def run_forever(self) -> None:
         while True:
+            if not self.database.is_setup_complete():
+                interval = int(self.database.get_config()["processing"]["poll_interval_seconds"])
+                time.sleep(max(interval, 1))
+                continue
             processed = self.process_next_task()
             if not processed:
                 interval = int(self.database.get_config()["processing"]["poll_interval_seconds"])

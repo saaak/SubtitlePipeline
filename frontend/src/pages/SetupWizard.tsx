@@ -10,9 +10,11 @@ import {
   downloadModel,
   getConfig,
   getModels,
+  getSystemStatus,
   ModelListResponse,
   setSetupComplete,
   sourceLanguageOptions,
+  SystemStatus,
   testTranslation,
   translationContentTypeOptions,
   updateConfig,
@@ -29,6 +31,17 @@ export function SetupWizard({
   const [step, setStep] = useState(1)
   const [config, setConfig] = useState<AppConfig>(cloneConfig(defaultAppConfig))
   const [models, setModels] = useState<ModelListResponse>({ items: [], current_model: '' })
+  const [systemStatus, setSystemStatus] = useState<SystemStatus>({
+    setup_complete: false,
+    asr_ready: false,
+    translation_ready: false,
+    current_model: '',
+    proxy: {
+      http_proxy: null,
+      https_proxy: null,
+      hf_endpoint: null,
+    },
+  })
   const [selectedModel, setSelectedModel] = useState('')
   const [loading, setLoading] = useState(true)
   const [testing, setTesting] = useState(false)
@@ -40,9 +53,10 @@ export function SetupWizard({
   const load = async () => {
     setLoading(true)
     try {
-      const [nextConfig, nextModels] = await Promise.all([getConfig(), getModels()])
+      const [nextConfig, nextModels, nextStatus] = await Promise.all([getConfig(), getModels(), getSystemStatus()])
       setConfig(nextConfig)
       setModels(nextModels)
+      setSystemStatus(nextStatus)
       setSelectedModel(
         (current) =>
           current || nextModels.current_model || nextModels.items.find((item) => item.status === 'installed')?.name || 'small',
@@ -81,6 +95,12 @@ export function SetupWizard({
     bilingualModeOptions.find((option) => option.value === config.subtitle.bilingual_mode)?.label || config.subtitle.bilingual_mode
   const translationContentTypeLabel =
     translationContentTypeOptions.find((option) => option.value === config.translation.content_type)?.label || config.translation.content_type
+  const proxyItems = [
+    { label: 'HTTP 代理', value: systemStatus.proxy.http_proxy },
+    { label: 'HTTPS 代理', value: systemStatus.proxy.https_proxy },
+    { label: 'HuggingFace 镜像', value: systemStatus.proxy.hf_endpoint },
+  ]
+  const proxyConfigured = proxyItems.some((item) => Boolean(item.value))
 
   const handleDownload = async (name: string) => {
     try {
@@ -259,6 +279,25 @@ export function SetupWizard({
                 </div>
               </button>
             ))}
+          </div>
+          <div className="card">
+            <div className="card-header">
+              <div>
+                <h3>代理与镜像配置</h3>
+                <p>以下信息为容器当前生效的只读环境变量，修改后需重启容器。</p>
+              </div>
+            </div>
+            <div className="summary-grid">
+              {proxyItems.map((item) => (
+                <div key={item.label} className="summary-item">
+                  <span>{item.label}</span>
+                  <strong>{item.value || '未配置'}</strong>
+                </div>
+              ))}
+            </div>
+            {!proxyConfigured ? (
+              <div className="muted">如需加速模型下载，请在 Docker Compose 的 environment 中设置 HTTP_PROXY、HTTPS_PROXY 或 HF_ENDPOINT。</div>
+            ) : null}
           </div>
           <div className="page-actions">
             <button onClick={() => setStep(1)}>上一步</button>

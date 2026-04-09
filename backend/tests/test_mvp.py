@@ -88,6 +88,9 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             "SUBPIPELINE_MODELS_DIR": os.environ.get("SUBPIPELINE_MODELS_DIR"),
             "SUBPIPELINE_BROWSE_ROOTS": os.environ.get("SUBPIPELINE_BROWSE_ROOTS"),
             "SUBPIPELINE_OUTPUT_DIR": os.environ.get("SUBPIPELINE_OUTPUT_DIR"),
+            "HTTP_PROXY": os.environ.get("HTTP_PROXY"),
+            "HTTPS_PROXY": os.environ.get("HTTPS_PROXY"),
+            "HF_ENDPOINT": os.environ.get("HF_ENDPOINT"),
         }
         os.environ["SUBPIPELINE_DB_PATH"] = str(self.config_dir / "api.db")
         os.environ["SUBPIPELINE_FRONTEND_DIST"] = str(self.frontend_dist)
@@ -198,6 +201,16 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         updated = self.database.set_setup_complete(True)
         self.assertTrue(updated["setup_complete"])
 
+    def test_scanner_waits_until_setup_complete(self) -> None:
+        scanner = ScannerService(self.database)
+        with patch.object(self.database, "is_setup_complete", return_value=False), \
+             patch.object(scanner, "scan_once") as mock_scan_once, \
+             patch("app.runtime.time.sleep", side_effect=RuntimeError("stop")) as mock_sleep:
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                scanner.run_forever()
+        mock_scan_once.assert_not_called()
+        mock_sleep.assert_called_once_with(5)
+
     @patch("app.model_manager.DOWNLOAD_PROGRESS_POLL_SECONDS", 0.1)
     def test_model_download_stall_exposes_manual_download_hint(self) -> None:
         manager = ModelManager(str(self.models_dir), stall_timeout_seconds=1)
@@ -262,6 +275,29 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             browse_response = client.get("/api/browse", params={"path": str(self.data_dir)})
             self.assertEqual(browse_response.status_code, 200)
             self.assertEqual(browse_response.json()["current"], str(self.data_dir.resolve()))
+
+    def test_system_status_api_returns_proxy_config(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "HTTP_PROXY": "http://proxy.local:7890",
+                "HTTPS_PROXY": "http://secure-proxy.local:7890",
+                "HF_ENDPOINT": "https://hf-mirror.com",
+            },
+            clear=False,
+        ):
+            app = create_app()
+            with TestClient(app) as client:
+                response = client.get("/api/system/status")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["proxy"],
+            {
+                "http_proxy": "http://proxy.local:7890",
+                "https_proxy": "http://secure-proxy.local:7890",
+                "hf_endpoint": "https://hf-mirror.com",
+            },
+        )
 
     def test_api_tasks_includes_status_counts(self) -> None:
         statuses = ["pending", "processing", "failed", "done", "cancelled"]

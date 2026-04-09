@@ -12,6 +12,9 @@ services:
       SUBPIPELINE_PORT: "8000"
       SUBPIPELINE_DB_PATH: /config/subpipeline.db
       SUBPIPELINE_FRONTEND_DIST: /app/frontend/dist
+      # HTTP_PROXY: http://host.docker.internal:7890
+      # HTTPS_PROXY: http://host.docker.internal:7890
+      # HF_ENDPOINT: https://hf-mirror.com
     volumes:
       - ./data:/data
       - ./output:/output

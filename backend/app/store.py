@@ -333,6 +333,17 @@ class Database:
                 "UPDATE system_config SET restart_required = 0 WHERE scope = 'system'"
             )
 
+    def is_setup_complete(self) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT value_json
+                FROM system_config
+                WHERE group_name = 'system' AND key_name = 'setup_complete'
+                """
+            ).fetchone()
+        return bool(json.loads(row["value_json"])) if row else False
+
     def get_system_status(self) -> dict[str, Any]:
         config = self.get_config()
         translation = config["translation"]
@@ -342,17 +353,8 @@ class Database:
                 str(translation[key]).strip()
                 for key in ("api_base_url", "api_key", "model")
             )
-        with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT value_json
-                FROM system_config
-                WHERE group_name = 'system' AND key_name = 'setup_complete'
-                """
-            ).fetchone()
-        setup_complete = bool(json.loads(row["value_json"])) if row else False
         return {
-            "setup_complete": setup_complete,
+            "setup_complete": self.is_setup_complete(),
             "translation_ready": translation_ready,
         }
 

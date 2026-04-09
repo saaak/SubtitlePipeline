@@ -115,6 +115,11 @@ export type SystemStatus = {
   asr_ready: boolean
   translation_ready: boolean
   current_model: string
+  proxy: {
+    http_proxy: string | null
+    https_proxy: string | null
+    hf_endpoint: string | null
+  }
 }
 
 export type ModelItem = {

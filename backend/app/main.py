@@ -62,6 +62,14 @@ class SetupCompleteRequest(BaseModel):
     setup_complete: bool = True
 
 
+def get_proxy_status() -> dict[str, str | None]:
+    return {
+        "http_proxy": os.environ.get("HTTP_PROXY"),
+        "https_proxy": os.environ.get("HTTPS_PROXY"),
+        "hf_endpoint": os.environ.get("HF_ENDPOINT"),
+    }
+
+
 def resolve_db_path() -> str:
     return os.environ.get("SUBPIPELINE_DB_PATH", "/config/subpipeline.db")
 
@@ -262,6 +270,7 @@ def create_app() -> FastAPI:
             **system_status,
             "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
             "current_model": config["whisper"]["model_name"],
+            "proxy": get_proxy_status(),
         }
 
     @app.post("/api/system/setup-complete")
@@ -274,6 +283,7 @@ def create_app() -> FastAPI:
             **updated,
             "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
             "current_model": config["whisper"]["model_name"],
+            "proxy": get_proxy_status(),
         }
 
     @app.post("/api/translation/test")
