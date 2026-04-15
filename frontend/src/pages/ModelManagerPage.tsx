@@ -9,11 +9,19 @@ const emptyModels: ModelListResponse = {
   current_model: '',
 }
 
+const modelSeries = [
+  { id: 'whisperx', label: 'WhisperX 系列', description: '标准 Whisper + 强制对齐' },
+  { id: 'faster-whisper', label: 'Faster-Whisper 系列', description: '轻量快速推理' },
+  { id: 'anime-whisper', label: 'Anime-Whisper 系列', description: '动漫日语优化' },
+  { id: 'qwen', label: 'Qwen 系列', description: '多语言 LLM-based' },
+]
+
 export function ModelManagerPage() {
   const [data, setData] = useState<ModelListResponse>(emptyModels)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busyModel, setBusyModel] = useState('')
+  const [selectedSeries, setSelectedSeries] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -26,10 +34,21 @@ export function ModelManagerPage() {
 
   usePolling(load, 2000, [])
 
-  const hasDownloading = useMemo(
-    () => data.items.some((item) => item.status === 'downloading'),
+  const currentModel = useMemo(
+    () => data.items.find((item) => item.current) || null,
     [data.items],
   )
+
+  const filteredModels = useMemo(() => {
+    if (!selectedSeries) return data.items
+    return data.items.filter((item) => item.provider === selectedSeries)
+  }, [data.items, selectedSeries])
+
+  const availableSeries = useMemo(() => {
+    const providers = new Set<string>()
+    data.items.forEach((item) => providers.add(item.provider))
+    return modelSeries.filter((series) => providers.has(series.id))
+  }, [data.items])
 
   const runAction = async (model: ModelItem, action: 'download' | 'delete' | 'activate') => {
     setBusyModel(model.name)
@@ -71,75 +90,125 @@ export function ModelManagerPage() {
       </div>
       <div className="card">
         <div className="card-header">
-          <h2>已知模型</h2>
-          <span className="muted">{hasDownloading ? '检测到下载任务进行中' : `当前模型：${data.current_model || '-'}`}</span>
+          <div>
+            <h2>当前使用模型</h2>
+            <p>当前生效的模型和安装状态。</p>
+          </div>
+          <span className={`status-chip ${currentModel?.status || 'not_installed'}`}>
+            {currentModel?.status || 'unknown'}
+          </span>
         </div>
-        <table className="task-table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>大小</th>
-              <th>状态</th>
-              <th>路径</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.items.map((item) => (
-              <tr key={item.name}>
-                <td>
-                  <div className="table-main">
-                    <strong>{item.name}</strong>
-                    {item.current ? <span className="status-chip installed">当前使用</span> : null}
-                  </div>
-                </td>
-                <td>{item.size_label}</td>
-                <td>
-                  <div className="status-stack">
-                    <span className={`status-chip ${item.status}`}>{item.status}</span>
-                    {item.status === 'downloading' ? (
-                      <div className="progress-inline">
-                        <div className="progress-bar">
-                          <span style={{ width: `${item.progress}%` }} />
-                        </div>
-                        <span>{item.progress}%</span>
-                      </div>
-                    ) : null}
-                    {item.stalled ? <span className="status-chip stalled">下载超时</span> : null}
-                    {item.error ? <span className="muted">{item.error}</span> : null}
-                    {item.stalled && item.manual_download_url ? (
-                      <a href={item.manual_download_url} target="_blank" rel="noreferrer">
-                        前往 HuggingFace 手动下载
-                      </a>
-                    ) : null}
-                  </div>
-                </td>
-                <td className="task-file">{item.path}</td>
-                <td className="actions-cell wrap">
-                  <button
-                    disabled={item.status !== 'not_installed' || busyModel === item.name}
-                    onClick={() => void runAction(item, 'download')}
-                  >
-                    下载
-                  </button>
-                  <button
-                    disabled={item.status !== 'installed' || item.current || busyModel === item.name}
-                    onClick={() => void runAction(item, 'activate')}
-                  >
-                    切换
-                  </button>
-                  <button
-                    disabled={item.status !== 'installed' || item.current || busyModel === item.name}
-                    onClick={() => void runAction(item, 'delete')}
-                  >
-                    删除
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {currentModel ? (
+          <div className="summary-grid">
+            <div className="summary-item">
+              <span className="field-label">模型</span>
+              <strong>{currentModel.display_name}</strong>
+              <span className="muted">{currentModel.name}</span>
+            </div>
+            <div className="summary-item">
+              <span className="field-label">说明</span>
+              <span className="muted">{currentModel.description}</span>
+            </div>
+            <div className="summary-item">
+              <span className="field-label">标签</span>
+              <div className="status-stack">
+                {currentModel.tags.map((tag) => (
+                  <span key={tag} className="status-chip not_installed">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="summary-item">
+              <span className="field-label">本地路径</span>
+              <span className="muted">{currentModel.path}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="muted">当前还没有激活模型。</div>
+        )}
       </div>
+
+      <div className="card">
+        <div className="card-header">
+          <h2>所有模型</h2>
+          <div className="tag-filter">
+            <button
+              className={selectedSeries === null ? 'active' : ''}
+              onClick={() => setSelectedSeries(null)}
+            >
+              全部 ({data.items.length})
+            </button>
+            {availableSeries.map((series) => (
+              <button
+                key={series.id}
+                className={selectedSeries === series.id ? 'active' : ''}
+                onClick={() => setSelectedSeries(series.id)}
+                title={series.description}
+              >
+                {series.label} ({data.items.filter((item) => item.provider === series.id).length})
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="model-grid advanced-grid">
+          {filteredModels.map((item) => (
+            <div className="model-card" key={item.name}>
+              <div className="table-main">
+                <strong>{item.display_name}</strong>
+                {item.current ? <span className="status-chip installed">当前使用</span> : null}
+              </div>
+              <span className="muted">{item.description}</span>
+              <div className="status-stack">
+                <span className={`status-chip ${item.status}`}>{item.status}</span>
+                <span className="muted">{item.size_label}</span>
+                {item.tags.map((tag) => (
+                  <span key={`${item.name}-${tag}`} className="status-chip not_installed">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+              {item.status === 'downloading' ? (
+                <div className="progress-inline">
+                  <div className="progress-bar">
+                    <span style={{ width: `${item.progress}%` }} />
+                  </div>
+                  <span>{item.progress}%</span>
+                </div>
+              ) : null}
+              {item.stalled ? <span className="status-chip stalled">下载超时</span> : null}
+              {item.error ? <span className="muted">{item.error}</span> : null}
+              <span className="muted">{item.path}</span>
+              {item.stalled && item.manual_download_url ? (
+                <a href={item.manual_download_url} target="_blank" rel="noreferrer">
+                  前往 HuggingFace 手动下载
+                </a>
+              ) : null}
+              <div className="actions-cell wrap">
+                <button
+                  disabled={item.status !== 'not_installed' || busyModel === item.name}
+                  onClick={() => void runAction(item, 'download')}
+                >
+                  下载
+                </button>
+                <button
+                  disabled={item.status !== 'installed' || item.current || busyModel === item.name}
+                  onClick={() => void runAction(item, 'activate')}
+                >
+                  切换
+                </button>
+                <button
+                  disabled={item.status !== 'installed' || item.current || busyModel === item.name}
+                  onClick={() => void runAction(item, 'delete')}
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="card compact">
         <h2>使用建议</h2>
         <ul className="simple-list">

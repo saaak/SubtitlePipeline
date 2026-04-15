@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import threading
 import time
+import wave
+from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +17,15 @@ from typing import Any
 
 import openai
 from openai import OpenAI
+
+from .model_manager import (
+    DEFAULT_PROVIDER,
+    KNOWN_MODELS_BY_NAME,
+    get_default_model_name,
+    infer_provider_from_model_name,
+    normalize_provider_name,
+    resolve_model_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +131,306 @@ class WhisperModelCache:
         self._align_language = language
         self._align_device = device
         return self._align_model, self._align_metadata
+
+
+def _get_models_root() -> Path:
+    return Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
+
+
+def _resolve_provider_model_reference(model_name: str, provider: str) -> str:
+    models_root = _get_models_root()
+    local_model_dir = models_root / model_name
+    if local_model_dir.exists():
+        return str(local_model_dir)
+    if provider in {"whisperx", "faster-whisper"} and "-" in model_name:
+        return model_name.split("-", 1)[1]
+    spec = KNOWN_MODELS_BY_NAME.get(model_name)
+    return spec.repo_id if spec is not None else model_name
+
+
+def _normalize_asr_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for segment in segments:
+        normalized.append(
+            {
+                "start": float(segment.get("start", 0.0)),
+                "end": float(segment.get("end", segment.get("start", 0.0))),
+                "text": str(segment.get("text", "")).strip(),
+            }
+        )
+    return normalized
+
+
+def _estimate_audio_duration(audio_path: Path) -> float:
+    try:
+        if audio_path.suffix.lower() == ".wav":
+            with wave.open(str(audio_path), "rb") as wav_file:
+                frame_rate = wav_file.getframerate()
+                if frame_rate > 0:
+                    return wav_file.getnframes() / float(frame_rate)
+    except Exception:
+        pass
+    try:
+        import librosa  # type: ignore
+
+        return float(librosa.get_duration(path=str(audio_path)))
+    except Exception:
+        return 0.0
+
+
+class ASRProvider(ABC):
+    def __init__(self, config: dict[str, Any], provider_name: str) -> None:
+        self.config = config
+        self.provider_name = normalize_provider_name(provider_name)
+        self.device = str(config.get("device", "cpu"))
+        self.model_name = resolve_model_name(
+            str(config.get("model_name", get_default_model_name(self.provider_name))),
+            self.provider_name,
+        )
+        # 读取通用配置
+        self.beam_size = int(config.get("beam_size", 5))
+        self.vad_filter = bool(config.get("vad_filter", True))
+        self.vad_threshold = float(config.get("vad_threshold", 0.5))
+        self.align_method = str(config.get("align_method", "auto"))
+        # 读取高级配置
+        advanced = config.get("advanced", {})
+        self.advanced = advanced if isinstance(advanced, dict) else {}
+
+    @abstractmethod
+    def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def supports_model(self, model_name: str) -> bool:
+        raise NotImplementedError
+
+
+class WhisperXProvider(ASRProvider):
+    def __init__(self, config: dict[str, Any], model_cache: WhisperModelCache | None = None) -> None:
+        super().__init__(config, "whisperx")
+        self.model_cache = model_cache or WhisperModelCache()
+        self.align_extend = int(self.advanced.get("whisperx_align_extend", 2))
+
+    def supports_model(self, model_name: str) -> bool:
+        return resolve_model_name(model_name, "whisperx").startswith("whisperx-")
+
+    def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
+        try:
+            import whisperx  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
+        model = self.model_cache.get_model(self.model_name, self.device, language)
+        result = model.transcribe(str(audio_path))
+
+        # 根据 align_method 决定是否对齐
+        should_align = self.align_method in ("auto", "whisperx")
+        if not should_align or self.align_method == "none":
+            return {
+                "segments": _normalize_asr_segments(result.get("segments", [])),
+                "language": str(result.get("language", language or "auto")),
+            }
+
+        # 执行强制对齐
+        align_model, metadata = self.model_cache.get_align_model(str(result.get("language", "en")), self.device)
+        aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), self.device)
+        return {
+            "segments": _normalize_asr_segments(aligned["segments"]),
+            "language": str(result.get("language", language or "auto")),
+        }
+
+
+class FasterWhisperProvider(ASRProvider):
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config, "faster-whisper")
+        self.word_timestamps = bool(self.advanced.get("faster_whisper_word_timestamps", False))
+        self._model: Any | None = None
+        self._loaded_name: str | None = None
+        self._loaded_device: str | None = None
+
+    def supports_model(self, model_name: str) -> bool:
+        return resolve_model_name(model_name, "faster-whisper").startswith("faster-whisper-")
+
+    def _get_model(self) -> Any:
+        if self._model is not None and self._loaded_name == self.model_name and self._loaded_device == self.device:
+            return self._model
+        try:
+            from faster_whisper import WhisperModel  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("faster-whisper 未安装，无法执行识别") from exc
+        compute_type = "float16" if self.device == "cuda" else "int8"
+        model_reference = _resolve_provider_model_reference(self.model_name, self.provider_name)
+        self._model = WhisperModel(model_reference, device=self.device, compute_type=compute_type)
+        self._loaded_name = self.model_name
+        self._loaded_device = self.device
+        return self._model
+
+    def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
+        model = self._get_model()
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            beam_size=self.beam_size,
+            vad_filter=self.vad_filter,
+            vad_parameters={"threshold": self.vad_threshold},
+            word_timestamps=self.word_timestamps,
+        )
+        normalized = [
+            {
+                "start": float(segment.start),
+                "end": float(segment.end),
+                "text": str(segment.text).strip(),
+            }
+            for segment in segments
+        ]
+        detected_language = getattr(info, "language", language or "auto")
+        return {"segments": normalized, "language": str(detected_language)}
+
+
+class AnimeWhisperProvider(ASRProvider):
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config, "anime-whisper")
+        self.enhance_dialogue = bool(self.advanced.get("anime_whisper_enhance_dialogue", True))
+        self._pipeline: Any | None = None
+        self._loaded_name: str | None = None
+
+    def supports_model(self, model_name: str) -> bool:
+        return resolve_model_name(model_name, "anime-whisper").startswith("anime-whisper-")
+
+    def _get_pipeline(self) -> Any:
+        if self._pipeline is not None and self._loaded_name == self.model_name:
+            return self._pipeline
+        try:
+            import torch  # type: ignore
+            from transformers import pipeline as transformers_pipeline  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("transformers 未安装，无法执行 Anime-Whisper 识别") from exc
+        torch_dtype = torch.float16 if self.device == "cuda" else torch.float32
+        model_reference = _resolve_provider_model_reference(self.model_name, self.provider_name)
+        pipeline_kwargs: dict[str, Any] = {
+            "task": "automatic-speech-recognition",
+            "model": model_reference,
+            "torch_dtype": torch_dtype,
+        }
+        if self.device == "cuda":
+            pipeline_kwargs["device"] = 0
+        self._pipeline = transformers_pipeline(**pipeline_kwargs)
+        self._loaded_name = self.model_name
+        return self._pipeline
+
+    def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
+        pipe = self._get_pipeline()
+        result = pipe(
+            str(audio_path),
+            generate_kwargs={"language": language or "ja", "num_beams": self.beam_size},
+            return_timestamps=True,
+        )
+        chunks = result.get("chunks") if isinstance(result, dict) else None
+        if not isinstance(chunks, list) or not chunks:
+            text = str(result.get("text", "") if isinstance(result, dict) else result).strip()
+            duration = _estimate_audio_duration(audio_path)
+            chunks = [{"timestamp": (0.0, duration), "text": text}]
+        segments: list[dict[str, Any]] = []
+        for chunk in chunks:
+            start, end = chunk.get("timestamp", (0.0, 0.0))
+            segments.append(
+                {
+                    "start": float(start or 0.0),
+                    "end": float(end or start or 0.0),
+                    "text": str(chunk.get("text", "")).strip(),
+                }
+            )
+        return {"segments": segments, "language": str(language or "ja")}
+
+
+class QwenASRProvider(ASRProvider):
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config, "qwen")
+        self.temperature = float(self.advanced.get("qwen_temperature", 0.0))
+        self._model: Any | None = None
+        self._loaded_name: str | None = None
+
+    def supports_model(self, model_name: str) -> bool:
+        return resolve_model_name(model_name, "qwen").startswith("qwen")
+
+    def _get_model(self) -> Any:
+        if self._model is not None and self._loaded_name == self.model_name:
+            return self._model
+        try:
+            import torch  # type: ignore
+            from qwen_asr import Qwen3ASRModel  # type: ignore
+        except ImportError as exc:
+            raise PipelineError("qwen-asr 未安装，请运行: pip install qwen-asr") from exc
+
+        model_reference = _resolve_provider_model_reference(self.model_name, self.provider_name)
+        logger.info(f"加载 Qwen ASR 模型: {model_reference}")
+
+        # 降低 batch size 避免 OOM
+        model_kwargs: dict[str, Any] = {
+            "dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+            "max_inference_batch_size": 1,  # 降低到 4 避免内存溢出
+            "max_new_tokens": 2048,
+        }
+        if self.device == "cuda":
+            model_kwargs["device_map"] = "cuda:0"
+        else:
+            model_kwargs["device_map"] = "cpu"
+
+        self._model = Qwen3ASRModel.from_pretrained(model_reference, **model_kwargs)
+        self._loaded_name = self.model_name
+        logger.info(f"Qwen ASR 模型加载完成")
+        return self._model
+
+    def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
+        model = self._get_model()
+        logger.info(f"开始 Qwen ASR 转录: {audio_path}")
+
+        results = model.transcribe(audio=str(audio_path), language=language)
+
+        if not results or len(results) == 0:
+            duration = _estimate_audio_duration(audio_path)
+            return {"segments": [{"start": 0.0, "end": duration, "text": ""}], "language": language or "auto"}
+
+        result = results[0]
+        detected_language = result.language if hasattr(result, "language") else (language or "auto")
+        text = result.text if hasattr(result, "text") else ""
+
+        logger.info(f"Qwen ASR 转录完成，语言: {detected_language}")
+
+        # 检查是否有分段时间戳
+        if hasattr(result, "segments") and result.segments:
+            segments = []
+            for seg in result.segments:
+                segments.append({
+                    "start": float(seg.start if hasattr(seg, "start") else 0.0),
+                    "end": float(seg.end if hasattr(seg, "end") else 0.0),
+                    "text": str(seg.text if hasattr(seg, "text") else "").strip(),
+                })
+            return {"segments": segments, "language": detected_language}
+
+        # 简单分段（单个 segment）
+        duration = _estimate_audio_duration(audio_path)
+        return {
+            "segments": [{"start": 0.0, "end": duration, "text": text}],
+            "language": detected_language,
+        }
+
+
+class ASRProviderFactory:
+    @staticmethod
+    def create(config: dict[str, Any], model_cache: WhisperModelCache | None = None) -> ASRProvider:
+        # 从 model_name 推断 provider（不再从配置读取 provider 字段）
+        model_name = str(config.get("model_name", ""))
+        provider = infer_provider_from_model_name(model_name, DEFAULT_PROVIDER)
+
+        if provider == "whisperx":
+            return WhisperXProvider(config, model_cache)
+        if provider == "faster-whisper":
+            return FasterWhisperProvider(config)
+        if provider == "anime-whisper":
+            return AnimeWhisperProvider(config)
+        if provider == "qwen":
+            return QwenASRProvider(config)
+        raise ValueError(f"不支持的 ASR Provider: {provider}")
 
 
 @dataclass(frozen=True)
@@ -729,31 +1040,41 @@ def load_asr_result(context: TaskContext) -> dict[str, Any]:
     return payload
 
 
-def run_asr(context: TaskContext, audio_path: Path, model_cache: WhisperModelCache | None = None) -> dict[str, Any]:
+def run_asr(context: TaskContext, audio_path: Path, model_cache: WhisperModelCache | None = None, database: Any = None) -> dict[str, Any]:
     whisper_config = context.config_snapshot["whisper"]
     subtitle_config = context.config_snapshot["subtitle"]
     source_language = str(subtitle_config.get("source_language", "auto")).strip().lower()
     language_hint = source_language if source_language and source_language != "auto" else None
-    cache = model_cache or WhisperModelCache()
-    try:
-        import whisperx  # type: ignore
-    except ImportError as exc:
-        raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-    model = cache.get_model(str(whisper_config["model_name"]), str(whisper_config["device"]), language_hint)
-    result = model.transcribe(str(audio_path))
-    align_model, metadata = cache.get_align_model(str(result.get("language", "en")), str(whisper_config["device"]))
-    aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), whisper_config["device"])
+    provider_name = normalize_provider_name(
+        whisper_config.get("provider")
+        or infer_provider_from_model_name(str(whisper_config.get("model_name", "")), DEFAULT_PROVIDER)
+    )
+    canonical_whisper_config = {
+        **whisper_config,
+        "provider": provider_name,
+        "model_name": resolve_model_name(
+            str(whisper_config.get("model_name", get_default_model_name(provider_name))),
+            provider_name,
+        ),
+    }
+
+    model_name = canonical_whisper_config["model_name"]
+    device = canonical_whisper_config["device"]
+    if database is not None:
+        database.log(context.task_id, "asr", "INFO", f"ASR 配置: 模型={model_name}, Provider={provider_name}, 设备={device}")
+
+    provider = ASRProviderFactory.create(canonical_whisper_config, model_cache or WhisperModelCache())
+    result = provider.transcribe(audio_path, language_hint)
+
+    if database is not None:
+        database.log(context.task_id, "asr", "INFO", f"ASR 完成: 识别到 {len(result.get('segments', []))} 个片段, 语言={result.get('language', 'unknown')}")
+
     return {
-        "segments": [
-            {
-                "start": float(segment["start"]),
-                "end": float(segment["end"]),
-                "text": str(segment["text"]).strip(),
-            }
-            for segment in aligned["segments"]
-        ],
-        "device": whisper_config["device"],
+        "segments": _normalize_asr_segments(result.get("segments", [])),
+        "language": str(result.get("language", language_hint or "auto")),
+        "device": canonical_whisper_config["device"],
         "audio_path": str(audio_path),
+        "provider": provider.provider_name,
     }
 
 

@@ -60,7 +60,7 @@ export function SetupWizard({
       setSystemStatus(nextStatus)
       setSelectedModel(
         (current) =>
-          current || nextModels.current_model || nextModels.items.find((item) => item.status === 'installed')?.name || 'small',
+          current || nextModels.current_model || nextModels.items.find((item) => item.status === 'installed')?.name || 'whisperx-small',
       )
       setError('')
     } catch (err) {

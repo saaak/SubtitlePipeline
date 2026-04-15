@@ -252,7 +252,7 @@ class WorkerService:
         if start_stage in {"queued", "extract_audio", "asr"}:
             if audio_path is None:
                 raise PipelineError("缺少音频文件，无法执行 ASR")
-            asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path, self.model_cache))
+            asr_result = self._run_stage(task["id"], "asr", 35, lambda: run_asr(context, audio_path, self.model_cache, self.database))
             save_asr_result(context, asr_result)
         if start_stage in {"queued", "extract_audio", "asr", "text_process"}:
             if asr_result is None:

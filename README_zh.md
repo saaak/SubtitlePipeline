@@ -10,7 +10,7 @@
 
 - **自动生成字幕** — 指定媒体目录，自动扫描视频文件、识别语音、翻译并生成 `.srt` 字幕文件
 - **流媒体服务器集成** — 字幕直接输出到视频同目录，支持自定义命名规则（如 `影片.zh.srt`、`影片.forced.zh.srt`），Jellyfin / Emby / Plex 自动识别加载
-- **WhisperX 语音识别** — 本地语音识别，支持多种模型规格（tiny / small / medium / large-v2），支持 GPU 加速
+- **多 Provider 语音识别** — 可在设置页切换 WhisperX、Faster-Whisper、Anime-Whisper、Qwen-ASR，并分别配置专属参数
 - **智能翻译** — 兼容 OpenAI API 的翻译服务，内置 7 种内容类型预设（电影、纪录片、动漫、技术演讲等），支持滑动窗口上下文和速率限制处理
 - **字幕封装** — 可选通过 FFmpeg 将字幕封装回视频容器
 
@@ -64,7 +64,7 @@ docker run --gpus all -p 8000:8000 \
 |------|------|
 | `/data` | 输入视频文件（你的媒体库目录） |
 | `/output` | 备用输出目录 |
-| `/models` | WhisperX 模型存储 |
+| `/models` | 所有 ASR Provider 的模型存储 |
 | `/config` | SQLite 数据库和配置 |
 
 ## 流媒体服务器集成
@@ -100,11 +100,32 @@ SubtitlePipeline 专为配合流媒体服务器使用而设计。默认情况下
 | 配置组 | 关键配置项 |
 |--------|-----------|
 | `file` | 输入目录、输出到源目录、允许的扩展名、扫描间隔 |
-| `whisper` | 模型名称、设备（自动检测 cuda/cpu） |
+| `whisper` | provider、模型名称、设备（自动检测 cuda/cpu）、provider_config |
 | `translation` | 启用翻译、目标语言、API 地址、API 密钥、模型、内容类型 |
 | `subtitle` | 双语字幕、双语模式（合并/分离）、文件名模板、源语言 |
 | `mux` | 启用封装、文件名模板 |
 | `processing` | 最大重试次数、重试模式（重启/续传） |
+
+### ASR Provider 选择建议
+
+| Provider | 适用场景 | 说明 |
+|----------|----------|------|
+| `whisperx` | 需要精准字幕时间戳 | 默认 Provider，模型名形如 `whisperx-small` |
+| `faster-whisper` | 快速预览、批量处理 | 启动更快，可配置 VAD 与词级时间戳 |
+| `anime-whisper` | 日语动漫对白 | 默认偏向日语，可调对话增强 |
+| `qwen` | 多语言混合与复杂语境 | 基于 transformers，可调 temperature / 强制对齐 |
+
+### 模型命名规则
+
+为避免不同 Provider 的模型重名，所有模型使用带前缀的统一命名：
+
+- `whisperx-small`
+- `faster-whisper-large-v3`
+- `anime-whisper`
+- `qwen3-asr-0.6b`
+- `qwen3-asr-1.7b`
+
+在模型管理页切换模型时，后端会自动同步更新 `whisper.model_name` 与 `whisper.provider`。
 
 ### 翻译内容类型
 
@@ -131,7 +152,7 @@ SubtitlePipeline 专为配合流媒体服务器使用而设计。默认情况下
 - Python 3.12+
 - Node.js 22+
 - FFmpeg
-- （可选）WhisperX：`pip install whisperx`
+- `backend/requirements.txt` 已包含可选 ASR 依赖：`whisperx`、`faster-whisper`、`transformers`、`librosa`
 
 ### 后端
 
@@ -162,7 +183,7 @@ npm run dev
 | 层级 | 技术 |
 |------|------|
 | 后端 | Python 3.12、FastAPI、Pydantic、SQLite (WAL) |
-| 语音识别 | WhisperX (Systran/faster-whisper) |
+| 语音识别 | WhisperX、Faster-Whisper、Anime-Whisper、Qwen-ASR |
 | 翻译 | OpenAI 兼容 API (httpx + openai SDK) |
 | 音视频 | FFmpeg |
 | 前端 | React 18、TypeScript、React Router 6、Vite 5 |

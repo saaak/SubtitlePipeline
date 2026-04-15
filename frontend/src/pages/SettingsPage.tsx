@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 
 import {
   AppConfig,
+  AlignMethod,
   bilingualModeOptions,
   cloneConfig,
   defaultAppConfig,
@@ -18,6 +19,13 @@ import {
 import { DirectoryPicker } from '../components/DirectoryPicker'
 
 type GroupName = 'file' | 'processing' | 'whisper' | 'translation' | 'subtitle' | 'mux' | 'logging'
+
+const alignMethodOptions = [
+  { value: 'auto', label: '自动（推荐）' },
+  { value: 'whisperx', label: 'WhisperX 强制对齐' },
+  { value: 'simple', label: '简单分段' },
+  { value: 'none', label: '禁用' },
+]
 
 function TagEditor({
   label,
@@ -163,6 +171,7 @@ export function SettingsPage() {
     () => models.items.find((item) => item.current),
     [models.items],
   )
+
   const usingCustomPrompt = config.translation.custom_prompt.trim().length > 0
 
   const submit = async () => {
@@ -304,11 +313,43 @@ export function SettingsPage() {
             <div className="field-block">
               <span className="field-label">当前模型</span>
               <div className="model-summary">
-                <strong>{config.whisper.model_name}</strong>
+                <strong>{currentModel?.display_name || config.whisper.model_name}</strong>
                 <span className={`status-chip ${currentModel?.status || 'not_installed'}`}>{currentModel?.status || 'not_installed'}</span>
                 <Link to="/models">前往模型管理</Link>
               </div>
+              <span className="muted">{currentModel?.description || '可在模型管理页下载并切换模型。'}</span>
             </div>
+            <label>
+              <span>Beam Size</span>
+              <input type="number" value={config.whisper.beam_size} onChange={(event) => setField('whisper', 'beam_size', Number(event.target.value))} />
+            </label>
+            <label className="switch-row">
+              <span>VAD 过滤</span>
+              <input
+                type="checkbox"
+                checked={config.whisper.vad_filter}
+                onChange={(event) => setField('whisper', 'vad_filter', event.target.checked)}
+              />
+            </label>
+            <label>
+              <span>VAD 阈值</span>
+              <input
+                type="number"
+                step="0.1"
+                value={config.whisper.vad_threshold}
+                onChange={(event) => setField('whisper', 'vad_threshold', Number(event.target.value))}
+              />
+            </label>
+            <label>
+              <span>对齐方法</span>
+              <select value={config.whisper.align_method} onChange={(event) => setField('whisper', 'align_method', event.target.value as AlignMethod)}>
+                {alignMethodOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>采样率</span>
               <input type="number" value={config.whisper.sample_rate} onChange={(event) => setField('whisper', 'sample_rate', Number(event.target.value))} />
@@ -325,6 +366,44 @@ export function SettingsPage() {
               </select>
             </label>
           </div>
+          <details className="advanced-section">
+            <summary>高级选项</summary>
+            <div className="field-grid">
+              <label>
+                <span>WhisperX 对齐扩展时长</span>
+                <input
+                  type="number"
+                  value={config.whisper.advanced.whisperx_align_extend}
+                  onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_align_extend: Number(event.target.value) })}
+                />
+              </label>
+              <label className="switch-row">
+                <span>Faster-Whisper 词级时间戳</span>
+                <input
+                  type="checkbox"
+                  checked={config.whisper.advanced.faster_whisper_word_timestamps}
+                  onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_word_timestamps: event.target.checked })}
+                />
+              </label>
+              <label className="switch-row">
+                <span>Anime-Whisper 对话增强</span>
+                <input
+                  type="checkbox"
+                  checked={config.whisper.advanced.anime_whisper_enhance_dialogue}
+                  onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_enhance_dialogue: event.target.checked })}
+                />
+              </label>
+              <label>
+                <span>Qwen Temperature</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={config.whisper.advanced.qwen_temperature}
+                  onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_temperature: Number(event.target.value) })}
+                />
+              </label>
+            </div>
+          </details>
         </div>
 
         <div className="card">
