@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {
         "work_dir": "/config/work",
     },
     "whisper": {
+        "provider": "whisperx",
         "model_name": "whisperx-small",
         "device": "auto",
         "audio_format": "wav",

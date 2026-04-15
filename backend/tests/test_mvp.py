@@ -17,17 +17,14 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from app.asr import ASRProviderFactory, FasterWhisperProvider, WhisperModelCache, WhisperXProvider, run_asr
 from app.main import create_app
 from app.model_manager import ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
-    ASRProviderFactory,
-    FasterWhisperProvider,
     FORMAT_INSTRUCTION,
     TRANSLATION_PRESETS,
     PipelineError,
     TaskContext,
-    WhisperModelCache,
-    WhisperXProvider,
     build_chunk_user_message,
     build_chunks,
     debug_translation_request,
@@ -35,7 +32,6 @@ from app.pipeline import (
     mux_subtitle,
     parse_chunk_output,
     parse_numbered_lines,
-    run_asr,
     translate_segments,
 )
 from app.runtime import ScannerService, WorkerService
