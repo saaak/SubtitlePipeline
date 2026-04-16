@@ -67,59 +67,16 @@ class TaskContext:
     using_fallback_intermediates: bool = False
 
 
-class WhisperModelCache:
-    def __init__(self) -> None:
-        self._model: Any | None = None
-        self._model_name: str | None = None
-        self._model_device: str | None = None
-        self._model_language: str | None = None
-        self._align_model: Any | None = None
-        self._align_metadata: Any | None = None
-        self._align_language: str | None = None
-        self._align_device: str | None = None
-
-    def get_model(self, name: str, device: str, language: str | None = None) -> Any:
-        if (
-            self._model is not None
-            and self._model_name == name
-            and self._model_device == device
-            and self._model_language == language
-        ):
-            return self._model
-        try:
-            import whisperx  # type: ignore
-        except ImportError as exc:
-            raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-        models_root = Path(os.environ.get("SUBPIPELINE_MODELS_DIR", "/models"))
-        local_model_dir = models_root / name
-        model_reference = str(local_model_dir) if local_model_dir.exists() else name
-        kwargs = {"download_root": str(models_root)}
-        if language is not None:
-            kwargs["language"] = language
-        self._model = whisperx.load_model(model_reference, device, **kwargs)
-        self._model_name = name
-        self._model_device = device
-        self._model_language = language
-        return self._model
-
-    def get_align_model(self, language: str, device: str) -> tuple[Any, Any]:
-        if (
-            self._align_model is not None
-            and self._align_language == language
-            and self._align_device == device
-        ):
-            return self._align_model, self._align_metadata
-        try:
-            import whisperx  # type: ignore
-        except ImportError as exc:
-            raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-        self._align_model, self._align_metadata = whisperx.load_align_model(
-            language_code=language,
-            device=device,
-        )
-        self._align_language = language
-        self._align_device = device
-        return self._align_model, self._align_metadata
+from .asr import (
+    ASRProvider,
+    ASRProviderFactory,
+    AnimeWhisperProvider,
+    FasterWhisperProvider,
+    QwenASRProvider,
+    WhisperModelCache,
+    WhisperXProvider,
+    run_asr,
+)
 
 
 @dataclass(frozen=True)
@@ -519,7 +476,6 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
                 if choice is None:
                     continue
                 if choice.delta and choice.delta.content:
-                    print(choice.delta.content, end="", flush=True)
                     parts.append(choice.delta.content)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
@@ -727,34 +683,6 @@ def load_asr_result(context: TaskContext) -> dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
         raise PipelineError("asr_result.json 内容无效，无法继续执行")
     return payload
-
-
-def run_asr(context: TaskContext, audio_path: Path, model_cache: WhisperModelCache | None = None) -> dict[str, Any]:
-    whisper_config = context.config_snapshot["whisper"]
-    subtitle_config = context.config_snapshot["subtitle"]
-    source_language = str(subtitle_config.get("source_language", "auto")).strip().lower()
-    language_hint = source_language if source_language and source_language != "auto" else None
-    cache = model_cache or WhisperModelCache()
-    try:
-        import whisperx  # type: ignore
-    except ImportError as exc:
-        raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-    model = cache.get_model(str(whisper_config["model_name"]), str(whisper_config["device"]), language_hint)
-    result = model.transcribe(str(audio_path))
-    align_model, metadata = cache.get_align_model(str(result.get("language", "en")), str(whisper_config["device"]))
-    aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), whisper_config["device"])
-    return {
-        "segments": [
-            {
-                "start": float(segment["start"]),
-                "end": float(segment["end"]),
-                "text": str(segment["text"]).strip(),
-            }
-            for segment in aligned["segments"]
-        ],
-        "device": whisper_config["device"],
-        "audio_path": str(audio_path),
-    }
 
 
 def process_text_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:

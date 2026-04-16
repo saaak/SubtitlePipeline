@@ -10,7 +10,7 @@
 
 - **Automatic Subtitle Generation** — Point it at your media directory, and it will automatically scan, recognize speech, translate, and generate `.srt` subtitle files for every video
 - **Media Server Integration** — Output subtitles directly to the source video directory with configurable naming (e.g. `Movie.zh.srt`, `Movie.forced.zh.srt`) for automatic pickup by Jellyfin, Emby, Plex, etc.
-- **WhisperX ASR** — Local speech recognition with multiple model sizes (tiny / small / medium / large-v2), GPU acceleration supported
+- **Multi-Provider ASR** — Switch between WhisperX, Faster-Whisper, Anime-Whisper, and Qwen-ASR from the settings page, each with provider-specific tuning options
 - **Smart Translation** — OpenAI-compatible API translation with 7 content-type presets (movie, documentary, anime, tech talk, etc.), sliding-window context, and rate-limit handling
 - **Subtitle Muxing** — Optionally mux subtitles back into the video container via FFmpeg
 
@@ -64,7 +64,7 @@ docker run --gpus all -p 8000:8000 \
 |------|---------|
 | `/data` | Input video files (your media library) |
 | `/output` | Fallback output directory |
-| `/models` | WhisperX model storage |
+| `/models` | ASR model storage for all providers |
 | `/config` | SQLite database and config |
 
 ## Media Server Integration
@@ -100,11 +100,32 @@ Configuration is managed through the Web UI settings page and persisted in SQLit
 | Group | Key Settings |
 |-------|-------------|
 | `file` | input_dir, output_to_source_dir, allowed_extensions, scan_interval |
-| `whisper` | model_name, device (auto-detect cuda/cpu) |
+| `whisper` | provider, model_name, device (auto-detect cuda/cpu), provider_config |
 | `translation` | enabled, target_languages, api_base_url, api_key, model, content_type |
 | `subtitle` | bilingual, bilingual_mode (merge/separate), filename_template, source_language |
 | `mux` | enabled, filename_template |
 | `processing` | max_retries, retry_mode (restart/resume) |
+
+### ASR Providers
+
+| Provider | Best For | Notes |
+|----------|----------|-------|
+| `whisperx` | Accurate subtitle timestamps | Uses forced alignment and provider-prefixed models like `whisperx-small` |
+| `faster-whisper` | Fast preview and batch jobs | Faster startup, optional VAD and word timestamps |
+| `anime-whisper` | Japanese anime dialogue | Defaults to Japanese and exposes dialogue-oriented options |
+| `qwen` | Multilingual mixed-content transcription | Transformer-based audio model with temperature / forced-alignment settings |
+
+### Model Naming
+
+Models now use provider-prefixed names to avoid collisions:
+
+- `whisperx-small`
+- `faster-whisper-large-v3`
+- `anime-whisper`
+- `qwen3-asr-0.6b`
+- `qwen3-asr-1.7b`
+
+When activating a model from the model manager, the backend automatically updates both `whisper.model_name` and `whisper.provider`.
 
 ### Translation Content Types
 
@@ -131,7 +152,7 @@ Built-in prompt presets for different content types:
 - Python 3.12+
 - Node.js 22+
 - FFmpeg
-- (Optional) WhisperX: `pip install whisperx`
+- Optional ASR extras are included in `backend/requirements.txt`: `whisperx`, `faster-whisper`, `transformers`, `librosa`
 
 ### Backend
 
@@ -162,7 +183,7 @@ npm run dev
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.12, FastAPI, Pydantic, SQLite (WAL) |
-| ASR Engine | WhisperX (Systran/faster-whisper) |
+| ASR Engine | WhisperX, Faster-Whisper, Anime-Whisper, Qwen-ASR |
 | Translation | OpenAI-compatible API (httpx + openai SDK) |
 | Audio/Video | FFmpeg |
 | Frontend | React 18, TypeScript, React Router 6, Vite 5 |

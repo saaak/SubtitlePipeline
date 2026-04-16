@@ -38,14 +38,25 @@ DEFAULT_CONFIG = {
         "poll_interval_seconds": 2,
         "work_dir": "/config/work",
     },
-    "scanner": {
-        "max_pending_tasks": 5,
-    },
     "whisper": {
-        "model_name": "small",
+        "provider": "whisperx",
+        "model_name": "whisperx-small",
         "device": "auto",
         "audio_format": "wav",
         "sample_rate": 16000,
+        # 通用配置（提升到顶层）
+        "beam_size": 5,
+        "vad_filter": True,
+        "vad_threshold": 0.5,
+        # 对齐方法选择
+        "align_method": "auto",  # auto | whisperx | simple | none
+        # 高级配置（Provider 特定）
+        "advanced": {
+            "whisperx_align_extend": 2,
+            "faster_whisper_word_timestamps": False,
+            "anime_whisper_enhance_dialogue": True,
+            "qwen_temperature": 0.0,
+        },
     },
     "translation": {
         "enabled": True,

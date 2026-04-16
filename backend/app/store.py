@@ -19,6 +19,7 @@ OBSOLETE_CONFIG_FIELDS = {
     ("file", "in_place"),
     ("file", "output_dir"),
     ("processing", "backend_mode"),
+    ("scanner", "max_pending_tasks"),
     ("translation", "provider"),
     ("translation", "mock_prefix_template"),
     ("translation", "fail_languages"),

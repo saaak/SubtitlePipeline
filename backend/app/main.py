@@ -12,7 +12,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .logging_utils import setup_logging
-from .model_manager import ModelManager
+from .model_manager import (
+    DEFAULT_PROVIDER,
+    PROVIDER_INFO,
+    ModelManager,
+    infer_provider_from_model_name,
+    normalize_provider_name,
+    resolve_model_name,
+)
 from .pipeline import PipelineError, check_resume_feasibility, get_translation_provider
 from .runtime import ScannerService, WorkerService
 from .store import Database
@@ -21,7 +28,6 @@ from .store import Database
 class ConfigUpdateRequest(BaseModel):
     file: dict[str, Any] | None = None
     processing: dict[str, Any] | None = None
-    scanner: dict[str, Any] | None = None
     whisper: dict[str, Any] | None = None
     translation: dict[str, Any] | None = None
     subtitle: dict[str, Any] | None = None
@@ -266,10 +272,16 @@ def create_app() -> FastAPI:
         model_manager = get_model_manager(app)
         config = database.get_config()
         system_status = database.get_system_status()
+        current_provider = normalize_provider_name(
+            config["whisper"].get("provider")
+            or infer_provider_from_model_name(str(config["whisper"]["model_name"]), DEFAULT_PROVIDER)
+        )
+        current_model = resolve_model_name(str(config["whisper"]["model_name"]), current_provider)
         return {
             **system_status,
-            "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
-            "current_model": config["whisper"]["model_name"],
+            "asr_ready": model_manager.has_model(current_model, current_provider),
+            "current_model": current_model,
+            "current_provider": current_provider,
             "proxy": get_proxy_status(),
         }
 
@@ -279,10 +291,16 @@ def create_app() -> FastAPI:
         updated = database.set_setup_complete(request.setup_complete)
         config = database.get_config()
         model_manager = get_model_manager(app)
+        current_provider = normalize_provider_name(
+            config["whisper"].get("provider")
+            or infer_provider_from_model_name(str(config["whisper"]["model_name"]), DEFAULT_PROVIDER)
+        )
+        current_model = resolve_model_name(str(config["whisper"]["model_name"]), current_provider)
         return {
             **updated,
-            "asr_ready": model_manager.has_model(str(config["whisper"]["model_name"])),
-            "current_model": config["whisper"]["model_name"],
+            "asr_ready": model_manager.has_model(current_model, current_provider),
+            "current_model": current_model,
+            "current_provider": current_provider,
             "proxy": get_proxy_status(),
         }
 
@@ -314,9 +332,16 @@ def create_app() -> FastAPI:
         database = get_database(app)
         model_manager = get_model_manager(app)
         config = database.get_config()
+        current_provider = normalize_provider_name(
+            config["whisper"].get("provider")
+            or infer_provider_from_model_name(str(config["whisper"]["model_name"]), DEFAULT_PROVIDER)
+        )
+        current_model = resolve_model_name(str(config["whisper"]["model_name"]), current_provider)
         return {
-            "items": model_manager.list_models(str(config["whisper"]["model_name"])),
-            "current_model": config["whisper"]["model_name"],
+            "items": model_manager.list_models(current_model),
+            "current_model": current_model,
+            "current_provider": current_provider,
+            "providers": PROVIDER_INFO,
         }
 
     @app.post("/api/models/{name}/download", status_code=202)
@@ -335,8 +360,13 @@ def create_app() -> FastAPI:
         database = get_database(app)
         model_manager = get_model_manager(app)
         config = database.get_config()
+        current_provider = normalize_provider_name(
+            config["whisper"].get("provider")
+            or infer_provider_from_model_name(str(config["whisper"]["model_name"]), DEFAULT_PROVIDER)
+        )
+        current_model = resolve_model_name(str(config["whisper"]["model_name"]), current_provider)
         try:
-            model_manager.delete_model(name, str(config["whisper"]["model_name"]))
+            model_manager.delete_model(name, current_model)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
@@ -347,14 +377,16 @@ def create_app() -> FastAPI:
     def activate_model(name: str) -> dict[str, Any]:
         database = get_database(app)
         model_manager = get_model_manager(app)
-        if not model_manager.has_model(name):
+        provider = infer_provider_from_model_name(name, DEFAULT_PROVIDER)
+        canonical_name = resolve_model_name(name, provider)
+        if not model_manager.has_model(canonical_name, provider):
             raise HTTPException(status_code=400, detail="模型尚未安装，无法切换")
         try:
-            updated = database.update_config({"whisper": {"model_name": name}})
+            updated = database.update_config({"whisper": {"model_name": canonical_name, "provider": provider}})
         except KeyError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {
-            "message": f"当前模型已切换为 {name}",
+            "message": f"当前模型已切换为 {canonical_name}",
             "config": updated,
         }
 

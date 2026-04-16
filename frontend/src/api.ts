@@ -56,6 +56,23 @@ export type TranslationContentType =
   | 'variety_show'
   | 'news'
 
+export type ASRProvider = 'whisperx' | 'faster-whisper' | 'anime-whisper' | 'qwen'
+export type AlignMethod = 'auto' | 'whisperx' | 'simple' | 'none'
+
+export type AdvancedConfig = {
+  whisperx_align_extend: number
+  faster_whisper_word_timestamps: boolean
+  anime_whisper_enhance_dialogue: boolean
+  qwen_temperature: number
+}
+
+export type ProviderInfo = {
+  display_name: string
+  description: string
+  features: string[]
+  best_for: string
+}
+
 export type AppConfig = {
   file: {
     input_dir: string
@@ -72,14 +89,16 @@ export type AppConfig = {
     poll_interval_seconds: number
     work_dir: string
   }
-  scanner: {
-    max_pending_tasks: number
-  }
   whisper: {
     model_name: string
     device: string
     audio_format: string
     sample_rate: number
+    beam_size: number
+    vad_filter: boolean
+    vad_threshold: number
+    align_method: AlignMethod
+    advanced: AdvancedConfig
   }
   translation: {
     enabled: boolean
@@ -115,6 +134,7 @@ export type SystemStatus = {
   asr_ready: boolean
   translation_ready: boolean
   current_model: string
+  current_provider?: ASRProvider
   proxy: {
     http_proxy: string | null
     https_proxy: string | null
@@ -131,6 +151,10 @@ export type ModelItem = {
   progress: number
   current: boolean
   path: string
+  provider: ASRProvider
+  display_name: string
+  description: string
+  tags: string[]
   error?: string | null
   stalled?: boolean
   manual_download_url?: string | null
@@ -139,6 +163,8 @@ export type ModelItem = {
 export type ModelListResponse = {
   items: ModelItem[]
   current_model: string
+  current_provider?: ASRProvider
+  providers?: Record<string, ProviderInfo>
 }
 
 export type TranslationTestPayload = {
@@ -195,6 +221,13 @@ export const sourceLanguageOptions: Array<{ value: SourceLanguage; label: string
   { value: 'ja', label: '日语' },
 ]
 
+export const asrProviderOptions: Array<{ value: ASRProvider; label: string }> = [
+  { value: 'whisperx', label: 'WhisperX' },
+  { value: 'faster-whisper', label: 'Faster-Whisper' },
+  { value: 'anime-whisper', label: 'Anime-Whisper' },
+  { value: 'qwen', label: 'Qwen-ASR' },
+]
+
 export const defaultAppConfig: AppConfig = {
   file: {
     input_dir: '/data',
@@ -211,14 +244,21 @@ export const defaultAppConfig: AppConfig = {
     poll_interval_seconds: 2,
     work_dir: '/config/work',
   },
-  scanner: {
-    max_pending_tasks: 5,
-  },
   whisper: {
-    model_name: 'small',
+    model_name: 'whisperx-small',
     device: 'auto',
     audio_format: 'wav',
     sample_rate: 16000,
+    beam_size: 5,
+    vad_filter: true,
+    vad_threshold: 0.5,
+    align_method: 'auto',
+    advanced: {
+      whisperx_align_extend: 2,
+      faster_whisper_word_timestamps: false,
+      anime_whisper_enhance_dialogue: true,
+      qwen_temperature: 0,
+    },
   },
   translation: {
     enabled: true,

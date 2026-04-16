@@ -19,7 +19,18 @@
       "Bash(pip install:*)",
       "Bash(python -m pytest tests/ -x -q)",
       "Bash(where pytest:*)",
-      "Bash(pip list:*)"
+      "Bash(pip list:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git checkout:*)",
+      "Bash(cat openspec/changes/*/proposal.md)",
+      "Read(//tmp/**)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebSearch",
+      "Bash(docker exec:*)",
+      "Bash(ls -la backend/app/*.py)",
+      "Read(//c/code/**)",
+      "Bash(openspec new:*)",
+      "Bash(npm run:*)"
     ],
     "additionalDirectories": [
       "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"

@@ -17,14 +17,14 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
+from app.asr import ASRProviderFactory, FasterWhisperProvider, WhisperModelCache, WhisperXProvider, run_asr
 from app.main import create_app
-from app.model_manager import ModelManager
+from app.model_manager import ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
     FORMAT_INSTRUCTION,
     TRANSLATION_PRESETS,
     PipelineError,
     TaskContext,
-    WhisperModelCache,
     build_chunk_user_message,
     build_chunks,
     debug_translation_request,
@@ -32,7 +32,6 @@ from app.pipeline import (
     mux_subtitle,
     parse_chunk_output,
     parse_numbered_lines,
-    run_asr,
     translate_segments,
 )
 from app.runtime import ScannerService, WorkerService
@@ -107,7 +106,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _create_installed_model(self, name: str) -> None:
-        model_dir = self.models_dir / name
+        model_dir = self.models_dir / resolve_model_name(name)
         model_dir.mkdir(parents=True, exist_ok=True)
         (model_dir / "weights.bin").write_bytes(b"model")
 
@@ -151,6 +150,12 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             connection.execute(
                 """
                 INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('scanner', 'max_pending_tasks', '5', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
                 VALUES ('file', 'output_dir', '"/legacy-output"', 'runtime', 0, 'now')
                 """
             )
@@ -182,6 +187,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         config = self.database.get_config()
         self.assertNotIn("provider", config["translation"])
         self.assertNotIn("backend_mode", config["processing"])
+        self.assertNotIn("scanner", config)
         self.assertNotIn("in_place", config["file"])
         self.assertNotIn("output_dir", config["file"])
         self.assertTrue("output_to_source_dir" in config["file"])
@@ -216,18 +222,18 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         manager = ModelManager(str(self.models_dir), stall_timeout_seconds=1)
         fake_hub = types.SimpleNamespace(snapshot_download=lambda **kwargs: time.sleep(2))
         with patch.dict(sys.modules, {"huggingface_hub": fake_hub}, clear=False):
-            manager.start_download("tiny")
+            manager.start_download("whisperx-tiny")
             time.sleep(1.2)
 
-        item = next(model for model in manager.list_models(current_model="small") if model["name"] == "tiny")
+        item = next(model for model in manager.list_models(current_model="whisperx-small") if model["name"] == "whisperx-tiny")
         self.assertEqual(item["status"], "downloading")
         self.assertTrue(item["stalled"])
         self.assertIn("huggingface.co/Systran/faster-whisper-tiny", item["manual_download_url"])
-        self.assertIn("/models/tiny", item["error"])
+        self.assertIn("/models/whisperx-tiny", item["error"])
 
     @patch("app.pipeline.OpenAI")
     def test_api_endpoints_cover_system_status_translation_and_models(self, mock_openai: MagicMock) -> None:
-        self._create_installed_model("small")
+        self._create_installed_model("whisperx-small")
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = self._stream_chunks("0|测试成功")
         mock_openai.return_value = mock_client
@@ -245,6 +251,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertEqual(status_response.status_code, 200)
             self.assertFalse(status_response.json()["setup_complete"])
             self.assertTrue(status_response.json()["asr_ready"])
+            self.assertEqual(status_response.json()["current_provider"], "whisperx")
 
             translation_response = client.post(
                 "/api/translation/test",
@@ -265,12 +272,15 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
             models_response = client.get("/api/models")
             self.assertEqual(models_response.status_code, 200)
-            self.assertEqual(models_response.json()["items"][1]["name"], "small")
+            self.assertEqual(models_response.json()["items"][1]["name"], "whisperx-small")
             self.assertEqual(models_response.json()["items"][1]["status"], "installed")
+            self.assertIn("providers", models_response.json())
+            self.assertEqual(models_response.json()["items"][1]["provider"], "whisperx")
 
-            activate_response = client.post("/api/models/small/activate")
+            activate_response = client.post("/api/models/whisperx-small/activate")
             self.assertEqual(activate_response.status_code, 200)
-            self.assertEqual(activate_response.json()["config"]["whisper"]["model_name"], "small")
+            self.assertEqual(activate_response.json()["config"]["whisper"]["model_name"], "whisperx-small")
+            self.assertEqual(activate_response.json()["config"]["whisper"]["provider"], "whisperx")
 
             browse_response = client.get("/api/browse", params={"path": str(self.data_dir)})
             self.assertEqual(browse_response.status_code, 200)
@@ -411,7 +421,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
                 },
             }
         )
-        self._create_installed_model("small")
+        self._create_installed_model("whisperx-small")
         video_path = self.data_dir / "translate_fail.mp4"
         video_path.write_bytes(b"demo-video-content")
         scanner = ScannerService(self.database)
@@ -438,7 +448,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertGreaterEqual(logs[0]["timestamp"], logs[1]["timestamp"])
 
     def test_scan_stability_and_end_to_end_output(self) -> None:
-        self._create_installed_model("small")
+        self._create_installed_model("whisperx-small")
         video_path = self.data_dir / "demo_video.mp4"
         video_path.write_bytes(b"demo-video-content")
         scanner = ScannerService(self.database)
@@ -460,7 +470,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIn("hello world.", subtitle_path.read_text(encoding="utf-8"))
 
     def test_output_to_source_dir_writes_subtitle_next_to_source_video(self) -> None:
-        self._create_installed_model("small")
+        self._create_installed_model("whisperx-small")
         self.database.update_config({"file": {"output_to_source_dir": True}})
         video_path = self.data_dir / "source_output.mp4"
         video_path.write_bytes(b"demo-video-content")
@@ -508,22 +518,6 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         third_scan = scanner.scan_once()
         self.assertEqual(third_scan.queued, 0)
         self.assertEqual(len(self.database.list_tasks(page=1, page_size=10).items), 1)
-
-    def test_scanner_throttling_blocks_new_tasks_when_pending_queue_is_full(self) -> None:
-        for index in range(5):
-            video_path = self.data_dir / f"pending-{index}.mp4"
-            video_path.write_bytes(f"video-{index}".encode())
-            observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
-            self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
-
-        blocked_video = self.data_dir / "blocked.mp4"
-        blocked_video.write_bytes(b"blocked-video")
-        scanner = ScannerService(self.database)
-        result = scanner.scan_once()
-
-        self.assertEqual(result.queued, 0)
-        self.assertTrue(result.throttled)
-        self.assertEqual(self.database.count_tasks_by_status("pending"), 5)
 
     def test_changed_file_version_is_requeued(self) -> None:
         video_path = self.data_dir / "updated.mp4"
@@ -732,9 +726,9 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
         cache = WhisperModelCache()
         with patch.dict(sys.modules, {"whisperx": fake_whisperx}, clear=False):
-            first_model = cache.get_model("small", "cpu")
-            second_model = cache.get_model("small", "cpu")
-            third_model = cache.get_model("small", "cpu", "ja")
+            first_model = cache.get_model("whisperx-small", "cpu")
+            second_model = cache.get_model("whisperx-small", "cpu")
+            third_model = cache.get_model("whisperx-small", "cpu", "ja")
             first_align = cache.get_align_model("en", "cpu")
             second_align = cache.get_align_model("en", "cpu")
 
@@ -778,6 +772,36 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
         self.assertEqual(result["segments"][0]["text"], "こんにちは")
         self.assertEqual(load_model_calls[0][3], "ja")
+        self.assertEqual(result["provider"], "whisperx")
+
+    def test_asr_provider_factory_defaults_to_whisperx(self) -> None:
+        provider = ASRProviderFactory.create({"model_name": "small", "device": "cpu"})
+        self.assertIsInstance(provider, WhisperXProvider)
+
+    def test_activate_model_updates_provider_by_prefix(self) -> None:
+        self._create_installed_model("faster-whisper-small")
+        app = create_app()
+        with TestClient(app) as client:
+            response = client.post("/api/models/faster-whisper-small/activate")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["config"]["whisper"]["provider"], "faster-whisper")
+        self.assertEqual(response.json()["config"]["whisper"]["model_name"], "faster-whisper-small")
+
+    def test_infer_provider_from_model_name_supports_legacy_alias(self) -> None:
+        self.assertEqual(infer_provider_from_model_name("small"), "whisperx")
+        self.assertEqual(resolve_model_name("small"), "whisperx-small")
+        self.assertEqual(resolve_model_name("anime-whisper-medium"), "anime-whisper")
+
+    def test_faster_whisper_provider_supports_prefixed_models(self) -> None:
+        provider = FasterWhisperProvider(
+            {
+                "provider": "faster-whisper",
+                "model_name": "faster-whisper-small",
+                "device": "cpu",
+                "provider_config": {"faster_whisper": {}},
+            }
+        )
+        self.assertTrue(provider.supports_model("faster-whisper-large-v3"))
 
     @patch("app.pipeline.OpenAI")
     def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:

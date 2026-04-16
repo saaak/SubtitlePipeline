@@ -57,12 +57,17 @@ select {
   display: grid;
   grid-template-columns: 250px 1fr;
   min-height: 100vh;
+  align-items: start;
 }
 
 .sidebar {
   background: #0f172a;
   color: #fff;
   padding: 28px 24px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .brand {
@@ -90,6 +95,7 @@ select {
 
 .content {
   padding: 32px;
+  min-width: 0;
 }
 
 .app-loading {
@@ -525,6 +531,12 @@ select {
     padding: 20px;
   }
 
+  .sidebar {
+    position: static;
+    height: auto;
+    overflow-y: visible;
+  }
+
   .detail-grid,
   .log-list li,
   .page-header,
@@ -541,3 +553,52 @@ select {
     width: 100%;
   }
 }
+
+/* Tag filter buttons */
+.tag-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tag-filter button {
+  padding: 6px 12px;
+  font-size: 14px;
+  background: #e2e8f0;
+  color: #475569;
+  border-radius: 6px;
+}
+
+.tag-filter button:hover:not(:disabled) {
+  background: #cbd5e1;
+}
+
+.tag-filter button.active {
+  background: #2563eb;
+  color: #fff;
+}
+
+/* Advanced section (details/summary) */
+.advanced-section {
+  margin-top: 16px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+.advanced-section summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: #475569;
+  user-select: none;
+}
+
+.advanced-section summary:hover {
+  color: #2563eb;
+}
+
+.advanced-section[open] summary {
+  margin-bottom: 12px;
+}
+
