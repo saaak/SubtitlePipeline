@@ -332,7 +332,7 @@ export function SetupWizard({
           </div>
           <div className="field-grid">
             <label>
-              <span>源语言</span>
+              <span>视频源语言</span>
               <select
                 value={config.subtitle.source_language}
                 onChange={(event) =>

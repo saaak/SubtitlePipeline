@@ -365,6 +365,22 @@ export function SettingsPage() {
                 <option value="mp3">mp3</option>
               </select>
             </label>
+            <label>
+              <span>视频源语言</span>
+              <select
+                value={config.subtitle.source_language}
+                onChange={(event) =>
+                  setField('subtitle', 'source_language', event.target.value as AppConfig['subtitle']['source_language'])
+                }
+              >
+                {sourceLanguageOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <span className="muted">会同时用于 ASR 识别提示与字幕命名；无法确定时建议保持自动检测。</span>
+            </label>
           </div>
           <details className="advanced-section">
             <summary>高级选项</summary>
@@ -524,22 +540,10 @@ export function SettingsPage() {
                 ))}
               </select>
             </label>
-            <label>
-              <span>源语言</span>
-              <select
-                value={config.subtitle.source_language}
-                onChange={(event) =>
-                  setField('subtitle', 'source_language', event.target.value as AppConfig['subtitle']['source_language'])
-                }
-              >
-                {sourceLanguageOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              <span className="muted">选错源语言可能影响识别准确度，无法确定时建议保持自动检测。</span>
-            </label>
+            <div className="field-block">
+              <span className="field-label">视频源语言</span>
+              <span className="muted">已移至上方“语音识别”卡片中配置，这里不再重复展示。</span>
+            </div>
             <div className="field-block">
               <span className="field-label">文件名模板</span>
               <input value={config.subtitle.filename_template} onChange={(event) => setField('subtitle', 'filename_template', event.target.value)} />

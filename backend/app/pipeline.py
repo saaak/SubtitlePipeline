@@ -476,7 +476,6 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
                 if choice is None:
                     continue
                 if choice.delta and choice.delta.content:
-                    print(choice.delta.content, end="", flush=True)
                     parts.append(choice.delta.content)
                 if choice.finish_reason:
                     finish_reason = choice.finish_reason
