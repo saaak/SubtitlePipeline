@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.asr import ASRProviderFactory, FasterWhisperProvider, WhisperModelCache, WhisperXProvider, run_asr
 from app.main import create_app
-from app.model_manager import ModelManager, infer_provider_from_model_name, resolve_model_name
+from app.model_manager import DownloadState, ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
     FORMAT_INSTRUCTION,
     TRANSLATION_PRESETS,
@@ -276,6 +276,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertEqual(models_response.json()["items"][1]["status"], "installed")
             self.assertIn("providers", models_response.json())
             self.assertEqual(models_response.json()["items"][1]["provider"], "whisperx")
+            self.assertEqual(models_response.json()["items"][1]["model_type"], "asr")
 
             activate_response = client.post("/api/models/whisperx-small/activate")
             self.assertEqual(activate_response.status_code, 200)
@@ -374,6 +375,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             resume_check = client.get(f"/api/tasks/{task['id']}/resume-check")
             self.assertEqual(resume_check.status_code, 200)
             self.assertTrue(resume_check.json()["can_resume"])
+            self.assertEqual(resume_check.json()["resume_stage"], "align_segments")
 
             resume_retry = client.post(f"/api/tasks/{task['id']}/retry", json={"mode": "resume"})
             self.assertEqual(resume_retry.status_code, 200)
@@ -381,7 +383,12 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertIsNotNone(resumed)
             assert resumed is not None
             self.assertEqual(resumed["status"], "pending")
-            self.assertEqual(resumed["stage"], "translate")
+            self.assertEqual(resumed["stage"], "align_segments")
+
+            (intermediates_dir / "aligned_segments.json").write_text(
+                json.dumps([{"start": 0, "end": 1, "text": "hello"}]),
+                encoding="utf-8",
+            )
 
             with self.database.connect() as connection:
                 connection.execute(
@@ -400,6 +407,79 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             assert restarted is not None
             self.assertEqual(restarted["stage"], "queued")
             self.assertFalse(intermediates_dir.exists())
+
+    def test_config_migrates_align_method_to_align_provider(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('whisper', 'align_method', '"whisperx"', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute("DELETE FROM system_config WHERE group_name = 'whisper' AND key_name = 'align_provider'")
+        self.database.initialize()
+        config = self.database.get_config()
+        self.assertEqual(config["whisper"]["align_provider"], "auto")
+        self.assertNotIn("align_method", config["whisper"])
+
+    def test_explicit_align_provider_persists(self) -> None:
+        self.database.update_config({"whisper": {"align_provider": "whisperx"}})
+        config = self.database.get_config()
+        self.assertEqual(config["whisper"]["align_provider"], "whisperx")
+
+    def test_model_progress_shows_nonzero_when_files_exist(self) -> None:
+        manager = ModelManager(str(self.models_dir))
+        model_dir = self.models_dir / "qwen3-forced-aligner"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "part.bin").write_bytes(b"x" * 1024)
+        with manager._lock:
+            manager._states["qwen3-forced-aligner"] = DownloadState(
+                status="downloading",
+                manual_download_url="https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B",
+            )
+        item = next(model for model in manager.list_models(current_model="whisperx-small") if model["name"] == "qwen3-forced-aligner")
+        self.assertEqual(item["status"], "downloading")
+        self.assertGreaterEqual(item["progress"], 1)
+
+    def test_resume_check_prefers_translate_when_align_checkpoint_exists(self) -> None:
+        video_path = self.data_dir / "resume_with_align.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
+        task = self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
+        snapshot = self.database.get_config()
+        snapshot["translation"]["enabled"] = False
+        snapshot_json = json.dumps(
+            {
+                group_name: group_values
+                for group_name, group_values in snapshot.items()
+                if group_name in {"file", "processing", "whisper", "translation", "subtitle", "mux"}
+            }
+        )
+        intermediates_dir = video_path.parent / ".subpipeline" / video_path.stem
+        intermediates_dir.mkdir(parents=True, exist_ok=True)
+        (intermediates_dir / "audio.wav").write_bytes(b"audio")
+        (intermediates_dir / "asr_result.json").write_text(json.dumps({"segments": [{"start": 0, "end": 1, "text": "hello"}]}), encoding="utf-8")
+        (intermediates_dir / "aligned_segments.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "hello"}]), encoding="utf-8")
+        (intermediates_dir / "processed_segments.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "hello."}]), encoding="utf-8")
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed', stage = 'translate', progress = 80, config_snapshot = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (snapshot_json, "now", task["id"]),
+            )
+
+        feasibility = self.database.get_task(task["id"])
+        self.assertIsNotNone(feasibility)
+        assert feasibility is not None
+        resume_check = self.database.request_retry(task["id"], mode="resume")
+        self.assertIsNotNone(resume_check)
+        updated = self.database.get_task(task["id"])
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["stage"], "translate")
 
     @patch("app.pipeline.OpenAI")
     def test_worker_failure_keeps_failed_stage_and_logs_newest_first(self, mock_openai: MagicMock) -> None:

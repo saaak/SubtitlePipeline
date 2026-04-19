@@ -59,7 +59,7 @@ class TranslationTestRequest(BaseModel):
     api_key: str = ""
     model: str = ""
     timeout_seconds: int = 30
-    target_language: str = "zh-CN"
+    target_language: str = "zh"
     content_type: str = "general"
     custom_prompt: str = ""
 

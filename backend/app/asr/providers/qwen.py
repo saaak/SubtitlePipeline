@@ -56,7 +56,7 @@ _SENTENCE_END = re.compile(r"[。！？…!?]+$")
 _MAX_GAP_SECONDS = 1.5
 
 
-def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
+def timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
     """Convert word-level Qwen time_stamps to sentence-level segments.
 
     The Qwen API returns word-level timestamps (ts.start_time / ts.end_time / ts.text).
@@ -106,7 +106,7 @@ def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
     return segments
 
 
-def _normalize_language(language: str | None) -> str | None:
+def normalize_qwen_language(language: str | None) -> str | None:
     """Convert ISO language code to Qwen ASR full language name."""
     if language is None:
         return None
@@ -154,7 +154,7 @@ class QwenASRProvider(ASRProvider):
 
     def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
         model = self._get_model()
-        qwen_language = _normalize_language(language)
+        qwen_language = normalize_qwen_language(language)
         logger.info("开始 Qwen ASR 转录: %s，语言: %s", audio_path, qwen_language or "auto")
         results = model.transcribe(audio=str(audio_path), language=qwen_language, return_time_stamps=True)
 
@@ -169,7 +169,7 @@ class QwenASRProvider(ASRProvider):
 
         time_stamps = getattr(result, "time_stamps", None)
         if time_stamps:
-            segments = _timestamps_to_segments(time_stamps)
+            segments = timestamps_to_segments(time_stamps)
             if segments:
                 return {"segments": segments, "language": detected_language}
 
@@ -179,3 +179,7 @@ class QwenASRProvider(ASRProvider):
             "segments": [{"start": 0.0, "end": duration, "text": text}],
             "language": detected_language,
         }
+
+
+_timestamps_to_segments = timestamps_to_segments
+_normalize_language = normalize_qwen_language

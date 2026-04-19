@@ -19,7 +19,7 @@ class ASRProvider(ABC):
         self.beam_size = int(config.get("beam_size", 5))
         self.vad_filter = bool(config.get("vad_filter", True))
         self.vad_threshold = float(config.get("vad_threshold", 0.5))
-        self.align_method = str(config.get("align_method", "auto"))
+        self.align_provider = str(config.get("align_provider", config.get("align_method", "auto")))
         advanced = config.get("advanced", {})
         self.advanced = advanced if isinstance(advanced, dict) else {}
 

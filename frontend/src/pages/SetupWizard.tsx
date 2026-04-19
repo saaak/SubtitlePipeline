@@ -137,7 +137,7 @@ export function SetupWizard({
         api_key: config.translation.api_key,
         model: config.translation.model,
         timeout_seconds: config.translation.timeout_seconds,
-        target_language: config.translation.target_languages[0] || 'zh-CN',
+        target_language: config.translation.target_languages[0] || 'zh',
         content_type: config.translation.content_type,
       })
       if (result.success) {
