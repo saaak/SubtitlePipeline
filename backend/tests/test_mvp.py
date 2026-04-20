@@ -18,6 +18,8 @@ if str(ROOT) not in sys.path:
 from fastapi.testclient import TestClient
 
 from app.asr import ASRProviderFactory, FasterWhisperProvider, WhisperModelCache, WhisperXProvider, run_asr
+from app.asr.aligners.qwen_forced_aligner import QwenForcedAligner
+from app.asr.providers.qwen import QwenASRProvider
 from app.main import create_app
 from app.model_manager import DownloadState, ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
@@ -853,6 +855,105 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["text"], "こんにちは")
         self.assertEqual(load_model_calls[0][3], "ja")
         self.assertEqual(result["provider"], "whisperx")
+
+    def test_qwen_provider_disables_timestamps_without_forced_aligner(self) -> None:
+        captured_calls: list[dict[str, object]] = []
+
+        class FakeResult:
+            language = "Japanese"
+            text = "こんにちは。さようなら。"
+            time_stamps = None
+
+        class FakeModel:
+            def transcribe(self, **kwargs):
+                captured_calls.append(kwargs)
+                return [FakeResult()]
+
+        fake_qwen_module = types.SimpleNamespace(
+            Qwen3ASRModel=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: FakeModel(),
+            )
+        )
+        fake_torch = types.SimpleNamespace(bfloat16="bf16", float32="fp32")
+        config = {
+            "provider": "qwen",
+            "model_name": "qwen3-asr-1.7b",
+            "device": "cpu",
+            "advanced": {"qwen_temperature": 0.0},
+        }
+        provider = QwenASRProvider(config)
+        audio_path = self.config_dir / "qwen-no-aligner.wav"
+        audio_path.write_bytes(b"audio")
+
+        with patch.dict(sys.modules, {"qwen_asr": fake_qwen_module, "torch": fake_torch}, clear=False):
+            with patch("app.asr.providers.qwen.estimate_audio_duration", return_value=10.0):
+                result = provider.transcribe(audio_path, "ja")
+
+        self.assertFalse(captured_calls[0]["return_time_stamps"])
+        self.assertEqual(len(result["segments"]), 2)
+
+    def test_qwen_provider_uses_local_forced_aligner_when_available(self) -> None:
+        init_kwargs: list[dict[str, object]] = []
+
+        class FakeResult:
+            language = "English"
+            text = "hello world"
+            time_stamps = [types.SimpleNamespace(text="hello", start_time=0.0, end_time=0.5)]
+
+        class FakeModel:
+            def transcribe(self, **kwargs):
+                return [FakeResult()]
+
+        fake_qwen_module = types.SimpleNamespace(
+            Qwen3ASRModel=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: init_kwargs.append(kwargs) or FakeModel(),
+            )
+        )
+        fake_torch = types.SimpleNamespace(bfloat16="bf16", float32="fp32")
+        aligner_dir = self.models_dir / "qwen3-forced-aligner"
+        aligner_dir.mkdir(parents=True, exist_ok=True)
+        (aligner_dir / "weights.bin").write_bytes(b"model")
+        config = {
+            "provider": "qwen",
+            "model_name": "qwen3-asr-1.7b",
+            "device": "cpu",
+            "advanced": {"qwen_temperature": 0.0},
+        }
+        provider = QwenASRProvider(config)
+        audio_path = self.config_dir / "qwen-with-aligner.wav"
+        audio_path.write_bytes(b"audio")
+
+        with patch.dict(sys.modules, {"qwen_asr": fake_qwen_module, "torch": fake_torch}, clear=False):
+            provider.transcribe(audio_path, "en")
+
+        self.assertEqual(init_kwargs[0]["forced_aligner"], str(aligner_dir))
+        self.assertIn("forced_aligner_kwargs", init_kwargs[0])
+
+    def test_qwen_forced_aligner_aligns_segments_individually(self) -> None:
+        align_calls: list[dict[str, object]] = []
+
+        class FakeAlignModel:
+            def align(self, audio, text, language):
+                align_calls.append({"audio": audio, "text": text, "language": language})
+                return [[types.SimpleNamespace(text=text, start_time=0.1, end_time=0.6)]]
+
+        aligner = QwenForcedAligner(self.models_dir)
+        audio_path = self.config_dir / "forced-align.wav"
+        audio_path.write_bytes(b"audio")
+        segments = [
+            {"start": 10.0, "end": 12.0, "text": "こんにちは。"},
+            {"start": 20.0, "end": 22.0, "text": "さようなら。"},
+        ]
+
+        with patch.object(QwenForcedAligner, "_get_model", return_value=FakeAlignModel()):
+            with patch("app.asr.aligners.qwen_forced_aligner._load_audio_slice", return_value=("samples", 16000)):
+                aligned = aligner.align(segments, audio_path, "ja", "cpu")
+
+        self.assertEqual(len(align_calls), 2)
+        self.assertEqual(align_calls[0]["text"], "こんにちは。")
+        self.assertEqual(align_calls[1]["text"], "さようなら。")
+        self.assertEqual(len(aligned), 2)
+        self.assertLess(aligned[0]["end"], aligned[1]["start"])
 
     def test_asr_provider_factory_defaults_to_whisperx(self) -> None:
         provider = ASRProviderFactory.create({"model_name": "small", "device": "cpu"})
