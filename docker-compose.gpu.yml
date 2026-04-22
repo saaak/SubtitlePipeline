@@ -1,9 +1,6 @@
 services:
   subpipeline:
-    build:
-      context: .
-      dockerfile: container/Dockerfile.gpu
-    image: subtitlepipeline:gpu
+    image: saaak/subtitlepipeline:latest-gpu
     container_name: subtitlepipeline-gpu
     restart: unless-stopped
     ports:
