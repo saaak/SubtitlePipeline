@@ -18,44 +18,44 @@
 
 ### Docker Compose (Recommended)
 
+Use pre-built images from Docker Hub (no local build required):
+
 **CPU:**
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
 **GPU (NVIDIA CUDA):**
 
 ```bash
-docker compose -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
 Open http://localhost:8000 in your browser. The setup wizard will guide you through initial configuration.
 
-### Docker Build
+### Local Build (Optional)
+
+If you need custom modifications or offline deployment, you can build locally:
 
 **CPU:**
 
 ```bash
+# Build the image
 docker build -f container/Dockerfile -t subtitlepipeline:cpu .
-docker run -p 8000:8000 \
-  -v ${PWD}/data:/data \
-  -v ${PWD}/output:/output \
-  -v ${PWD}/models:/models \
-  -v ${PWD}/config:/config \
-  subtitlepipeline:cpu
+
+# Update the image field in docker-compose.yml to subtitlepipeline:cpu, then start
+docker compose up -d
 ```
 
 **GPU:**
 
 ```bash
+# Build the image
 docker build -f container/Dockerfile.gpu -t subtitlepipeline:gpu .
-docker run --gpus all -p 8000:8000 \
-  -v ${PWD}/data:/data \
-  -v ${PWD}/output:/output \
-  -v ${PWD}/models:/models \
-  -v ${PWD}/config:/config \
-  subtitlepipeline:gpu
+
+# Update the image field in docker-compose.gpu.yml to subtitlepipeline:gpu, then start
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
 ### Volume Mounts
