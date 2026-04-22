@@ -18,44 +18,44 @@
 
 ### Docker Compose（推荐）
 
+使用 Docker Hub 预构建镜像，无需本地编译：
+
 **CPU 版本：**
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
 **GPU 版本（NVIDIA CUDA）：**
 
 ```bash
-docker compose -f docker-compose.gpu.yml up --build -d
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
 打开浏览器访问 http://localhost:8000，引导设置向导将帮助你完成初始配置。
 
-### Docker 构建
+### 本地构建镜像（可选）
+
+如果需要自定义修改或离线部署，可以本地构建镜像：
 
 **CPU 版本：**
 
 ```bash
+# 构建镜像
 docker build -f container/Dockerfile -t subtitlepipeline:cpu .
-docker run -p 8000:8000 \
-  -v ${PWD}/data:/data \
-  -v ${PWD}/output:/output \
-  -v ${PWD}/models:/models \
-  -v ${PWD}/config:/config \
-  subtitlepipeline:cpu
+
+# 使用本地镜像启动（修改 docker-compose.yml 中的 image 字段为 subtitlepipeline:cpu）
+docker compose up -d
 ```
 
 **GPU 版本：**
 
 ```bash
+# 构建镜像
 docker build -f container/Dockerfile.gpu -t subtitlepipeline:gpu .
-docker run --gpus all -p 8000:8000 \
-  -v ${PWD}/data:/data \
-  -v ${PWD}/output:/output \
-  -v ${PWD}/models:/models \
-  -v ${PWD}/config:/config \
-  subtitlepipeline:gpu
+
+# 使用本地镜像启动（修改 docker-compose.gpu.yml 中的 image 字段为 subtitlepipeline:gpu）
+docker compose -f docker-compose.gpu.yml up -d
 ```
 
 ### 挂载目录
