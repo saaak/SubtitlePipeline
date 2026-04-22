@@ -148,6 +148,8 @@ class QwenASRProvider(ASRProvider):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config, "qwen")
         self.temperature = float(self.advanced.get("qwen_temperature", 0.0))
+        self.max_inference_batch_size = int(self.advanced.get("qwen_max_inference_batch_size", 32))
+        self.max_new_tokens = int(self.advanced.get("qwen_max_new_tokens", 256))
         self._model: Any | None = None
         self._loaded_name: str | None = None
         self._loaded_forced_aligner: str | None = None
@@ -173,8 +175,8 @@ class QwenASRProvider(ASRProvider):
         logger.info("加载 Qwen ASR 模型: %s", model_reference)
         model_kwargs: dict[str, Any] = {
             "dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
-            "max_inference_batch_size": 1,
-            "max_new_tokens": 2048,
+            "max_inference_batch_size": self.max_inference_batch_size,
+            "max_new_tokens": self.max_new_tokens,
         }
         model_kwargs["device_map"] = "cuda:0" if self.device == "cuda" else "cpu"
         if forced_aligner_reference is not None:
@@ -190,9 +192,20 @@ class QwenASRProvider(ASRProvider):
         return self._model
 
     def _resolve_forced_aligner_reference(self) -> str | None:
+        align_provider = self.align_provider
         local_path = get_models_root() / "qwen3-forced-aligner"
-        if local_path.exists() and any(local_path.iterdir()):
+
+        if align_provider == "auto":
+            if local_path.exists() and any(local_path.iterdir()):
+                return str(local_path)
+            return None
+
+        if align_provider == "qwen-forced":
+            if not (local_path.exists() and any(local_path.iterdir())):
+                raise PipelineError("align_provider=qwen-forced 但未找到 qwen3-forced-aligner 模型")
             return str(local_path)
+
+        # whisperx / none / 其他：由独立对齐阶段处理，不在转录阶段内嵌
         return None
 
     def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:

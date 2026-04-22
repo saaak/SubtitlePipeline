@@ -619,22 +619,38 @@ export function SettingsPage() {
                   <span>设备</span>
                   <input type="text" value={config.whisper.device} readOnly disabled />
                 </label>
-                <label>
-                  <span>WhisperX 对齐扩展时长</span>
-                  <input type="number" value={config.whisper.advanced.whisperx_align_extend} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_align_extend: Number(event.target.value) })} />
-                </label>
-                <label className="switch-row">
-                  <span>Faster-Whisper 词级时间戳</span>
-                  <input type="checkbox" checked={config.whisper.advanced.faster_whisper_word_timestamps} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_word_timestamps: event.target.checked })} />
-                </label>
-                <label className="switch-row">
-                  <span>Anime-Whisper 对话增强</span>
-                  <input type="checkbox" checked={config.whisper.advanced.anime_whisper_enhance_dialogue} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_enhance_dialogue: event.target.checked })} />
-                </label>
-                <label>
-                  <span>Qwen Temperature</span>
-                  <input type="number" step="0.1" value={config.whisper.advanced.qwen_temperature} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_temperature: Number(event.target.value) })} />
-                </label>
+                {currentProvider === 'whisperx' && (
+                  <label>
+                    <span>WhisperX 对齐扩展时长</span>
+                    <input type="number" value={config.whisper.advanced.whisperx_align_extend} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_align_extend: Number(event.target.value) })} />
+                  </label>
+                )}
+                {currentProvider === 'faster-whisper' && (
+                  <label className="switch-row">
+                    <span>Faster-Whisper 词级时间戳</span>
+                    <input type="checkbox" checked={config.whisper.advanced.faster_whisper_word_timestamps} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_word_timestamps: event.target.checked })} />
+                  </label>
+                )}
+                {currentProvider === 'anime-whisper' && (
+                  <label className="switch-row">
+                    <span>Anime-Whisper 对话增强</span>
+                    <input type="checkbox" checked={config.whisper.advanced.anime_whisper_enhance_dialogue} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_enhance_dialogue: event.target.checked })} />
+                  </label>
+                )}
+                {currentProvider === 'qwen' && (<>
+                  <label>
+                    <span>Qwen Temperature</span>
+                    <input type="number" step="0.1" value={config.whisper.advanced.qwen_temperature} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_temperature: Number(event.target.value) })} />
+                  </label>
+                  <label>
+                    <span>Qwen 最大推理批次大小</span>
+                    <input type="number" step="1" min="1" value={config.whisper.advanced.qwen_max_inference_batch_size} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_max_inference_batch_size: Number(event.target.value) })} />
+                  </label>
+                  <label>
+                    <span>Qwen 最大新 Token 数</span>
+                    <input type="number" step="1" min="1" value={config.whisper.advanced.qwen_max_new_tokens} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_max_new_tokens: Number(event.target.value) })} />
+                  </label>
+                </>)}
                 <div className="field-block pipeline-wide">
                   <span className="field-label">模型管理</span>
                   <div className="model-summary">

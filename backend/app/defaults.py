@@ -56,6 +56,8 @@ DEFAULT_CONFIG = {
             "faster_whisper_word_timestamps": False,
             "anime_whisper_enhance_dialogue": True,
             "qwen_temperature": 0.0,
+            "qwen_max_inference_batch_size": 32,
+            "qwen_max_new_tokens": 256,
         },
     },
     "translation": {

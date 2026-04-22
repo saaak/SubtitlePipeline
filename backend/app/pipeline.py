@@ -15,6 +15,7 @@ from typing import Any
 
 import openai
 from openai import OpenAI
+from app.segment_cleaner import clean_segments
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,30 @@ def strip_code_fence(content: str) -> str:
 
 
 def strip_number_prefix(line: str) -> str:
-    return re.sub(r"^\s*\d+\|", "", line, count=1).strip()
+    """Strip number prefix from translation line.
+
+    Handles formats:
+    - 编号|译文 (half-width pipe)
+    - 编号｜译文 (full-width pipe)
+    - 编号||译文 (double pipe)
+    - 编号. 译文
+    - 编号: 译文 / 编号：译文
+    - 编号译文 (bare number, last resort)
+    - |译文 (bare leading pipe, no number)
+    """
+    # Try numbered formats with delimiters first
+    stripped = re.sub(r"^\s*\d+[|｜.:：]+\s*", "", line, count=1)
+    if stripped != line:
+        # Also strip any remaining leading pipes
+        return stripped.lstrip("|｜").strip()
+
+    # Bare leading pipe(s) with no number prefix
+    if line.strip().startswith("|") or line.strip().startswith("｜"):
+        return line.strip().lstrip("|｜").strip()
+
+    # Last resort: bare number at start (e.g., "9怎么样？")
+    stripped = re.sub(r"^\s*\d+", "", line, count=1)
+    return stripped.strip()
 
 
 @dataclass
@@ -212,16 +236,33 @@ def parse_numbered_lines_ordered(
         normalized = line.strip()
         if not normalized:
             continue
-        # Try to match "编号|译文" format
-        if "|" in normalized:
-            prefix, value = normalized.split("|", 1)
+        # Try to match "编号|译文" or "编号｜译文" format (half-width or full-width pipe)
+        if "|" in normalized or "｜" in normalized:
+            # Replace full-width pipe with half-width for uniform processing
+            normalized_pipe = normalized.replace("｜", "|")
+            prefix, value = normalized_pipe.split("|", 1)
             if prefix.strip().isdigit():
                 index = int(prefix.strip())
                 if index in expected and index not in matches:
-                    matches[index] = value.strip()
+                    cleaned_value = value.strip().lstrip("|｜").strip()
+                    matches[index] = cleaned_value
                 continue
         # Also accept "编号. 译文" or "编号: 译文" as fallback
         m = re.match(r"^\s*(\d+)\s*[.:：]\s*(.+)$", normalized)
+        if m:
+            index = int(m.group(1))
+            if index in expected and index not in matches:
+                matches[index] = m.group(2).strip()
+            continue
+        # Last resort: bare number prefix "编号译文" (no delimiter)
+        m = re.match(r"^\s*(\d+)(\S.*)$", normalized)
+        if m:
+            index = int(m.group(1))
+            if index in expected and index not in matches:
+                matches[index] = m.group(2).strip()
+            continue
+        # Last resort: bare number prefix "编号译文" (LLM forgot the separator)
+        m = re.match(r"^\s*(\d+)(\S.*)$", normalized)
         if m:
             index = int(m.group(1))
             if index in expected and index not in matches:
@@ -785,8 +826,12 @@ def align_segments(
 
 
 def process_text_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Step 1: Clean segments (remove repetition loops, merge fragments, split long segments, etc.)
+    cleaned = clean_segments(segments)
+
+    # Step 2: Normalize whitespace and add trailing punctuation
     processed: list[dict[str, Any]] = []
-    for segment in segments:
+    for segment in cleaned:
         text = " ".join(str(segment["text"]).split())
         if text and text[-1] not in ".!?。！？":
             text = f"{text}."

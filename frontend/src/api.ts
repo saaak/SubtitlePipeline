@@ -65,6 +65,8 @@ export type AdvancedConfig = {
   faster_whisper_word_timestamps: boolean
   anime_whisper_enhance_dialogue: boolean
   qwen_temperature: number
+  qwen_max_inference_batch_size: number
+  qwen_max_new_tokens: number
 }
 
 export type ProviderInfo = {
@@ -288,6 +290,8 @@ export const defaultAppConfig: AppConfig = {
       faster_whisper_word_timestamps: false,
       anime_whisper_enhance_dialogue: true,
       qwen_temperature: 0,
+      qwen_max_inference_batch_size: 32,
+      qwen_max_new_tokens: 256,
     },
   },
   translation: {
