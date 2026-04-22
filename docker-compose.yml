@@ -1,9 +1,6 @@
 services:
   subpipeline:
-    build:
-      context: .
-      dockerfile: container/Dockerfile
-    image: subtitlepipeline:cpu
+    image: saaak/subtitlepipeline:latest
     container_name: subtitlepipeline
     restart: unless-stopped
     ports:

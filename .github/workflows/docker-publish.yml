@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/subpipeline
+  DOCKERHUB_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/subtitlepipeline
 
 jobs:
   build-cpu:
