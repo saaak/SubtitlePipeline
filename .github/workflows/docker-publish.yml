@@ -35,10 +35,8 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_IMAGE }}
           tags: |
-            type=ref,event=branch,suffix=-cpu
-            type=semver,pattern={{version}},suffix=-cpu
-            type=semver,pattern={{major}}.{{minor}},suffix=-cpu
-            type=raw,value=latest,enable={{is_default_branch}},suffix=-cpu
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push CPU image
@@ -75,10 +73,9 @@ jobs:
         with:
           images: ${{ env.DOCKERHUB_IMAGE }}
           tags: |
-            type=ref,event=branch,suffix=-gpu
             type=semver,pattern={{version}},suffix=-gpu
             type=semver,pattern={{major}}.{{minor}},suffix=-gpu
-            type=raw,value=latest,enable={{is_default_branch}},suffix=-gpu
+            type=raw,value=latest-gpu,enable={{is_default_branch}}
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
