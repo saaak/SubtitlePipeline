@@ -7,6 +7,7 @@ from app.segment_cleaner import (
     clean_segments,
     detect_repetition_loop,
     fix_timestamp_anomalies,
+    merge_short_segments,
     remove_consecutive_duplicates,
     split_long_segment,
 )
@@ -70,6 +71,43 @@ class TestSegmentCleaner(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]["text"], "同じ")
         self.assertEqual(result[1]["text"], "違う")
+
+    def test_merge_short_segments(self):
+        # 模拟强制对齐器把「横山さん、具合は」切成单词的情况
+        segments = [
+            {"start": 65.57, "end": 70.61, "text": "ありがとうございます失礼."},  # 正常片段
+            {"start": 71.79, "end": 71.89, "text": "し."},    # gap_prev=1.18s → 合并到前
+            {"start": 76.30, "end": 76.54, "text": "ます."},  # gap_prev=4.41s, gap_next=2.84s → 合并到后
+            {"start": 79.38, "end": 79.62, "text": "横山."},  # gap_prev=2.84s → 合并到前
+            {"start": 85.02, "end": 85.10, "text": "さん."},  # gap_prev=5.4s, gap_next=2.03s → 合并到后
+            {"start": 87.13, "end": 87.21, "text": "具合."},  # gap_prev=2.03s → 合并到前
+            {"start": 90.05, "end": 95.38, "text": "どうですか."},  # 正常片段
+        ]
+        result = merge_short_segments(segments)
+
+        # 5 个短片段应该被合并，最终只剩 4 个（2 正常 + 2 合并组）
+        self.assertEqual(len(result), 4)
+        # 第一个包含 し（合并到前一正常片段）
+        self.assertIn("し", result[0]["text"])
+        # 第二个包含 ます 和 横山（ます→后合并，横山→前合并）
+        self.assertIn("ます", result[1]["text"])
+        self.assertIn("横山", result[1]["text"])
+        # 第三个包含 さん 和 具合（さん→后合并，具合→前合并）
+        self.assertIn("さん", result[2]["text"])
+        self.assertIn("具合", result[2]["text"])
+        # 第四个是正常片段
+        self.assertIn("どうですか", result[3]["text"])
+
+    def test_merge_short_segments_preserves_isolated(self):
+        # 两侧 gap 都 > 3s 的孤立片段不应被合并（如喘息声）
+        segments = [
+            {"start": 0.0,   "end": 1.0,   "text": "前段落."},
+            {"start": 50.0,  "end": 50.1,  "text": "あ."},   # gap_prev=49s, gap_next=49.9s → 保留
+            {"start": 100.0, "end": 101.0, "text": "后段落."},
+        ]
+        result = merge_short_segments(segments)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[1]["text"], "あ.")
 
     def test_clean_segments_integration(self):
         # 综合测试
