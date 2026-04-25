@@ -15,6 +15,7 @@ class WhisperXProvider(ASRProvider):
         super().__init__(config, "whisperx")
         self.model_cache = model_cache or WhisperModelCache()
         self.align_extend = int(self.advanced.get("whisperx_align_extend", 2))
+        self.compute_type = self.advanced.get("whisperx_compute_type", "auto")
 
     def supports_model(self, model_name: str) -> bool:
         return resolve_model_name(model_name, "whisperx").startswith("whisperx-")
@@ -24,7 +25,7 @@ class WhisperXProvider(ASRProvider):
             import whisperx  # type: ignore
         except ImportError as exc:
             raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
-        model = self.model_cache.get_model(self.model_name, self.device, language)
+        model = self.model_cache.get_model(self.model_name, self.device, language, self.compute_type)
         result = model.transcribe(str(audio_path))
 
         should_align = self.align_method in ("auto", "whisperx")

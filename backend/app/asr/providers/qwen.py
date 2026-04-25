@@ -54,6 +54,17 @@ _QWEN_SUPPORTED = frozenset(_ISO_TO_QWEN_LANGUAGE.values())
 # Split on sentence-ending punctuation or long silence gaps
 _SENTENCE_END = re.compile(r"[。！？…!?]+$")
 _MAX_GAP_SECONDS = 1.5
+_DTYPE_ALIASES = {
+    "fp16": "float16",
+    "half": "float16",
+    "float16": "float16",
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp32": "float32",
+    "float32": "float32",
+    "float": "float32",
+    "auto": "auto",
+}
 
 
 def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
@@ -120,36 +131,62 @@ def _normalize_language(language: str | None) -> str | None:
     return None
 
 
+def _resolve_torch_dtype(torch: Any, value: Any, device: str) -> tuple[Any, str]:
+    requested = str(value or "auto").strip().lower()
+    if not requested or requested == "auto":
+        return (torch.bfloat16, "bfloat16") if device == "cuda" else (torch.float32, "float32")
+    dtype_name = _DTYPE_ALIASES.get(requested)
+    if dtype_name is None:
+        raise PipelineError(f"qwen dtype 不支持: {value!r}，可用 auto/float32/float16/bfloat16")
+    return getattr(torch, dtype_name), dtype_name
+
+
 class QwenASRProvider(ASRProvider):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config, "qwen")
         self.temperature = float(self.advanced.get("qwen_temperature", 0.0))
+        self.dtype_setting = self.advanced.get("qwen_dtype", "auto")
         self._model: Any | None = None
         self._loaded_name: str | None = None
+        self._loaded_device: str | None = None
+        self._loaded_dtype_name: str | None = None
 
     def supports_model(self, model_name: str) -> bool:
         return resolve_model_name(model_name, "qwen").startswith("qwen")
 
     def _get_model(self) -> Any:
-        if self._model is not None and self._loaded_name == self.model_name:
-            return self._model
         try:
             import torch  # type: ignore
             from qwen_asr import Qwen3ASRModel  # type: ignore
         except ImportError as exc:
             raise PipelineError("qwen-asr 未安装，请运行: pip install qwen-asr") from exc
 
+        dtype, dtype_name = _resolve_torch_dtype(torch, self.dtype_setting, self.device)
+        if (
+            self._model is not None
+            and self._loaded_name == self.model_name
+            and self._loaded_device == self.device
+            and self._loaded_dtype_name == dtype_name
+        ):
+            return self._model
         model_reference = resolve_provider_model_reference(self.model_name, self.provider_name)
-        logger.info("加载 Qwen ASR 模型: %s", model_reference)
+        logger.info(
+            "加载 Qwen ASR 模型: %s, device=%s, dtype=%s",
+            model_reference,
+            self.device,
+            dtype_name,
+        )
         model_kwargs: dict[str, Any] = {
-            "dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+            "dtype": dtype,
             "max_inference_batch_size": 1,
             "max_new_tokens": 2048,
         }
         model_kwargs["device_map"] = "cuda:0" if self.device == "cuda" else "cpu"
         self._model = Qwen3ASRModel.from_pretrained(model_reference, **model_kwargs)
         self._loaded_name = self.model_name
-        logger.info("Qwen ASR 模型加载完成")
+        self._loaded_device = self.device
+        self._loaded_dtype_name = dtype_name
+        logger.info("Qwen ASR 模型加载完成: %s", model_reference)
         return self._model
 
     def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:

@@ -53,9 +53,13 @@ DEFAULT_CONFIG = {
         # 高级配置（Provider 特定）
         "advanced": {
             "whisperx_align_extend": 2,
+            "whisperx_compute_type": "auto",
             "faster_whisper_word_timestamps": False,
+            "faster_whisper_compute_type": "auto",
             "anime_whisper_enhance_dialogue": True,
+            "anime_whisper_dtype": "auto",
             "qwen_temperature": 0.0,
+            "qwen_dtype": "auto",
         },
     },
     "translation": {
