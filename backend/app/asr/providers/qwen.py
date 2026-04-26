@@ -8,7 +8,7 @@ from typing import Any
 from ...model_manager import resolve_model_name
 from ..base import ASRProvider
 from ..exceptions import PipelineError
-from ..helpers import estimate_audio_duration, resolve_provider_model_reference
+from ..helpers import estimate_audio_duration, get_models_root, resolve_provider_model_reference
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,7 @@ _QWEN_SUPPORTED = frozenset(_ISO_TO_QWEN_LANGUAGE.values())
 # Split on sentence-ending punctuation or long silence gaps
 _SENTENCE_END = re.compile(r"[。！？…!?]+$")
 _MAX_GAP_SECONDS = 1.5
+_SENTENCE_SPLIT = re.compile(r"(?<=[。！？!?\.])\s*")
 _DTYPE_ALIASES = {
     "fp16": "float16",
     "half": "float16",
@@ -67,18 +68,13 @@ _DTYPE_ALIASES = {
 }
 
 
-def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
-    """Convert word-level Qwen time_stamps to sentence-level segments.
-
-    The Qwen API returns word-level timestamps (ts.start_time / ts.end_time / ts.text).
-    This function groups them into sentence segments by punctuation boundaries and
-    silence gaps, which is what the subtitle pipeline expects.
-    """
+def timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
+    """Convert word-level Qwen time_stamps to sentence-level segments."""
     if not time_stamps:
         return []
 
     segments: list[dict[str, Any]] = []
-    buffer: list[dict[str, Any]] = []  # {"text", "end"}
+    buffer: list[dict[str, Any]] = []
     seg_start: float | None = None
 
     for ts in time_stamps:
@@ -88,7 +84,6 @@ def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
         start = float(getattr(ts, "start_time", 0.0))
         end = float(getattr(ts, "end_time", 0.0))
 
-        # Flush on long silence gap between this word and the previous
         if buffer and (start - buffer[-1]["end"]) > _MAX_GAP_SECONDS:
             text = "".join(w["text"] for w in buffer).strip()
             if text:
@@ -100,7 +95,6 @@ def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
             seg_start = start
         buffer.append({"text": word, "end": end})
 
-        # Flush on sentence-ending punctuation
         if _SENTENCE_END.search(word):
             text = "".join(w["text"] for w in buffer).strip()
             if text:
@@ -108,7 +102,6 @@ def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
             buffer = []
             seg_start = None
 
-    # Flush any remaining words
     if buffer and seg_start is not None:
         text = "".join(w["text"] for w in buffer).strip()
         if text:
@@ -117,11 +110,10 @@ def _timestamps_to_segments(time_stamps: list[Any]) -> list[dict[str, Any]]:
     return segments
 
 
-def _normalize_language(language: str | None) -> str | None:
+def normalize_qwen_language(language: str | None) -> str | None:
     """Convert ISO language code to Qwen ASR full language name."""
     if language is None:
         return None
-    # Already a full name
     if language in _QWEN_SUPPORTED:
         return language
     mapped = _ISO_TO_QWEN_LANGUAGE.get(language.lower())
@@ -141,20 +133,47 @@ def _resolve_torch_dtype(torch: Any, value: Any, device: str) -> tuple[Any, str]
     return getattr(torch, dtype_name), dtype_name
 
 
+def _text_to_fallback_segments(text: str, duration: float) -> list[dict[str, Any]]:
+    cleaned = text.strip()
+    if not cleaned:
+        return [{"start": 0.0, "end": duration, "text": ""}]
+    parts = [part.strip() for part in _SENTENCE_SPLIT.split(cleaned) if part.strip()]
+    if not parts:
+        parts = [cleaned]
+    total_chars = sum(max(len(part), 1) for part in parts)
+    current_start = 0.0
+    segments: list[dict[str, Any]] = []
+    if duration <= 0:
+        return [{"start": 0.0, "end": 0.0, "text": part} for part in parts]
+    for index, part in enumerate(parts):
+        if index == len(parts) - 1:
+            end = duration
+        else:
+            proportion = max(len(part), 1) / total_chars
+            end = min(duration, current_start + duration * proportion)
+        segments.append({"start": current_start, "end": end, "text": part})
+        current_start = end
+    return segments
+
+
 class QwenASRProvider(ASRProvider):
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config, "qwen")
         self.temperature = float(self.advanced.get("qwen_temperature", 0.0))
         self.dtype_setting = self.advanced.get("qwen_dtype", "auto")
+        self.max_inference_batch_size = int(self.advanced.get("qwen_max_inference_batch_size", 32))
+        self.max_new_tokens = int(self.advanced.get("qwen_max_new_tokens", 256))
         self._model: Any | None = None
         self._loaded_name: str | None = None
         self._loaded_device: str | None = None
         self._loaded_dtype_name: str | None = None
+        self._loaded_forced_aligner: str | None = None
 
     def supports_model(self, model_name: str) -> bool:
         return resolve_model_name(model_name, "qwen").startswith("qwen")
 
     def _get_model(self) -> Any:
+        forced_aligner_reference = self._resolve_forced_aligner_reference()
         try:
             import torch  # type: ignore
             from qwen_asr import Qwen3ASRModel  # type: ignore
@@ -167,8 +186,10 @@ class QwenASRProvider(ASRProvider):
             and self._loaded_name == self.model_name
             and self._loaded_device == self.device
             and self._loaded_dtype_name == dtype_name
+            and self._loaded_forced_aligner == forced_aligner_reference
         ):
             return self._model
+
         model_reference = resolve_provider_model_reference(self.model_name, self.provider_name)
         logger.info(
             "加载 Qwen ASR 模型: %s, device=%s, dtype=%s",
@@ -178,22 +199,48 @@ class QwenASRProvider(ASRProvider):
         )
         model_kwargs: dict[str, Any] = {
             "dtype": dtype,
-            "max_inference_batch_size": 1,
-            "max_new_tokens": 2048,
+            "max_inference_batch_size": self.max_inference_batch_size,
+            "max_new_tokens": self.max_new_tokens,
         }
         model_kwargs["device_map"] = "cuda:0" if self.device == "cuda" else "cpu"
+        if forced_aligner_reference is not None:
+            model_kwargs["forced_aligner"] = forced_aligner_reference
+            model_kwargs["forced_aligner_kwargs"] = {
+                "dtype": dtype,
+                "device_map": "cuda:0" if self.device == "cuda" else "cpu",
+            }
         self._model = Qwen3ASRModel.from_pretrained(model_reference, **model_kwargs)
         self._loaded_name = self.model_name
         self._loaded_device = self.device
         self._loaded_dtype_name = dtype_name
+        self._loaded_forced_aligner = forced_aligner_reference
         logger.info("Qwen ASR 模型加载完成: %s", model_reference)
         return self._model
 
+    def _resolve_forced_aligner_reference(self) -> str | None:
+        align_provider = self.align_provider
+        local_path = get_models_root() / "qwen3-forced-aligner"
+
+        if align_provider == "auto":
+            if local_path.exists() and any(local_path.iterdir()):
+                return str(local_path)
+            return None
+
+        if align_provider == "qwen-forced":
+            if not (local_path.exists() and any(local_path.iterdir())):
+                raise PipelineError("align_provider=qwen-forced 但未找到 qwen3-forced-aligner 模型")
+            return str(local_path)
+
+        return None
+
     def transcribe(self, audio_path: Path, language: str | None) -> dict[str, Any]:
         model = self._get_model()
-        qwen_language = _normalize_language(language)
+        qwen_language = normalize_qwen_language(language)
         logger.info("开始 Qwen ASR 转录: %s，语言: %s", audio_path, qwen_language or "auto")
-        results = model.transcribe(audio=str(audio_path), language=qwen_language, return_time_stamps=True)
+        return_timestamps = self._loaded_forced_aligner is not None
+        if not return_timestamps:
+            logger.warning("Qwen ASR 未检测到 qwen3-forced-aligner，转录阶段将不返回时间戳，后续可使用独立对齐阶段补齐")
+        results = model.transcribe(audio=str(audio_path), language=qwen_language, return_time_stamps=return_timestamps)
 
         if not results or len(results) == 0:
             duration = estimate_audio_duration(audio_path)
@@ -206,13 +253,16 @@ class QwenASRProvider(ASRProvider):
 
         time_stamps = getattr(result, "time_stamps", None)
         if time_stamps:
-            segments = _timestamps_to_segments(time_stamps)
+            segments = timestamps_to_segments(time_stamps)
             if segments:
                 return {"segments": segments, "language": detected_language}
 
-        # Fallback: no timestamps — return full text as a single timed segment
         duration = estimate_audio_duration(audio_path)
         return {
-            "segments": [{"start": 0.0, "end": duration, "text": text}],
+            "segments": _text_to_fallback_segments(text, duration),
             "language": detected_language,
         }
+
+
+_timestamps_to_segments = timestamps_to_segments
+_normalize_language = normalize_qwen_language

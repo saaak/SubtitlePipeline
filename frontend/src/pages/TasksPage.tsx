@@ -43,17 +43,16 @@ export function TasksPage() {
     try {
       const nextData = await getTasks(activeTab === 'all' ? undefined : activeTab, currentPage, PAGE_SIZE)
       setData(nextData)
-      if (activeTab === 'failed') {
+      const failedTasks = nextData.items.filter((task) => task.status === 'failed')
+      if (failedTasks.length > 0) {
         const checkEntries = await Promise.all(
-          nextData.items
-            .filter((task) => task.status === 'failed')
-            .map(async (task) => {
-              try {
-                return [task.id, await checkResumeFeasibility(task.id)] as const
-              } catch {
-                return [task.id, { can_resume: false, missing: [] }] as const
-              }
-            }),
+          failedTasks.map(async (task) => {
+            try {
+              return [task.id, await checkResumeFeasibility(task.id)] as const
+            } catch {
+              return [task.id, { can_resume: false, missing: [] }] as const
+            }
+          }),
         )
         setResumeChecks(Object.fromEntries(checkEntries))
       } else {
@@ -80,9 +79,6 @@ export function TasksPage() {
   const handleTabChange = (tab: TaskTab) => {
     setActiveTab(tab)
     setCurrentPage(1)
-    if (tab !== 'failed') {
-      setResumeChecks({})
-    }
   }
 
   const handleAction = async (taskId: number, type: 'cancel' | 'restart' | 'resume') => {

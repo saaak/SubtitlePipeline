@@ -21,13 +21,14 @@ from app.asr import (
     ASRProviderFactory,
     AnimeWhisperProvider,
     FasterWhisperProvider,
-    QwenASRProvider,
     WhisperModelCache,
     WhisperXProvider,
     run_asr,
 )
+from app.asr.aligners.qwen_forced_aligner import QwenForcedAligner
+from app.asr.providers.qwen import QwenASRProvider
 from app.main import create_app
-from app.model_manager import ModelManager, infer_provider_from_model_name, resolve_model_name
+from app.model_manager import DownloadState, ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
     FORMAT_INSTRUCTION,
     TRANSLATION_PRESETS,
@@ -284,6 +285,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertEqual(models_response.json()["items"][1]["status"], "installed")
             self.assertIn("providers", models_response.json())
             self.assertEqual(models_response.json()["items"][1]["provider"], "whisperx")
+            self.assertEqual(models_response.json()["items"][1]["model_type"], "asr")
 
             activate_response = client.post("/api/models/whisperx-small/activate")
             self.assertEqual(activate_response.status_code, 200)
@@ -382,6 +384,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             resume_check = client.get(f"/api/tasks/{task['id']}/resume-check")
             self.assertEqual(resume_check.status_code, 200)
             self.assertTrue(resume_check.json()["can_resume"])
+            self.assertEqual(resume_check.json()["resume_stage"], "align_segments")
 
             resume_retry = client.post(f"/api/tasks/{task['id']}/retry", json={"mode": "resume"})
             self.assertEqual(resume_retry.status_code, 200)
@@ -389,7 +392,12 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             self.assertIsNotNone(resumed)
             assert resumed is not None
             self.assertEqual(resumed["status"], "pending")
-            self.assertEqual(resumed["stage"], "translate")
+            self.assertEqual(resumed["stage"], "align_segments")
+
+            (intermediates_dir / "aligned_segments.json").write_text(
+                json.dumps([{"start": 0, "end": 1, "text": "hello"}]),
+                encoding="utf-8",
+            )
 
             with self.database.connect() as connection:
                 connection.execute(
@@ -408,6 +416,79 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             assert restarted is not None
             self.assertEqual(restarted["stage"], "queued")
             self.assertFalse(intermediates_dir.exists())
+
+    def test_config_migrates_align_method_to_align_provider(self) -> None:
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                VALUES ('whisper', 'align_method', '"whisperx"', 'runtime', 0, 'now')
+                """
+            )
+            connection.execute("DELETE FROM system_config WHERE group_name = 'whisper' AND key_name = 'align_provider'")
+        self.database.initialize()
+        config = self.database.get_config()
+        self.assertEqual(config["whisper"]["align_provider"], "auto")
+        self.assertNotIn("align_method", config["whisper"])
+
+    def test_explicit_align_provider_persists(self) -> None:
+        self.database.update_config({"whisper": {"align_provider": "whisperx"}})
+        config = self.database.get_config()
+        self.assertEqual(config["whisper"]["align_provider"], "whisperx")
+
+    def test_model_progress_shows_nonzero_when_files_exist(self) -> None:
+        manager = ModelManager(str(self.models_dir))
+        model_dir = self.models_dir / "qwen3-forced-aligner"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        (model_dir / "part.bin").write_bytes(b"x" * 1024)
+        with manager._lock:
+            manager._states["qwen3-forced-aligner"] = DownloadState(
+                status="downloading",
+                manual_download_url="https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B",
+            )
+        item = next(model for model in manager.list_models(current_model="whisperx-small") if model["name"] == "qwen3-forced-aligner")
+        self.assertEqual(item["status"], "downloading")
+        self.assertGreaterEqual(item["progress"], 1)
+
+    def test_resume_check_prefers_translate_when_align_checkpoint_exists(self) -> None:
+        video_path = self.data_dir / "resume_with_align.mp4"
+        video_path.write_bytes(b"demo-video-content")
+        observed = self.database.observe_file(str(video_path), int(video_path.stat().st_size), float(video_path.stat().st_mtime))
+        task = self.database.create_task(observed["file_id"], observed["path"], observed["size_bytes"], observed["mtime"])
+        snapshot = self.database.get_config()
+        snapshot["translation"]["enabled"] = False
+        snapshot_json = json.dumps(
+            {
+                group_name: group_values
+                for group_name, group_values in snapshot.items()
+                if group_name in {"file", "processing", "whisper", "translation", "subtitle", "mux"}
+            }
+        )
+        intermediates_dir = video_path.parent / ".subpipeline" / video_path.stem
+        intermediates_dir.mkdir(parents=True, exist_ok=True)
+        (intermediates_dir / "audio.wav").write_bytes(b"audio")
+        (intermediates_dir / "asr_result.json").write_text(json.dumps({"segments": [{"start": 0, "end": 1, "text": "hello"}]}), encoding="utf-8")
+        (intermediates_dir / "aligned_segments.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "hello"}]), encoding="utf-8")
+        (intermediates_dir / "processed_segments.json").write_text(json.dumps([{"start": 0, "end": 1, "text": "hello."}]), encoding="utf-8")
+        with self.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed', stage = 'translate', progress = 80, config_snapshot = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (snapshot_json, "now", task["id"]),
+            )
+
+        feasibility = self.database.get_task(task["id"])
+        self.assertIsNotNone(feasibility)
+        assert feasibility is not None
+        resume_check = self.database.request_retry(task["id"], mode="resume")
+        self.assertIsNotNone(resume_check)
+        updated = self.database.get_task(task["id"])
+        self.assertIsNotNone(updated)
+        assert updated is not None
+        self.assertEqual(updated["stage"], "translate")
 
     @patch("app.pipeline.OpenAI")
     def test_worker_failure_keeps_failed_stage_and_logs_newest_first(self, mock_openai: MagicMock) -> None:
@@ -799,6 +880,105 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["text"], "こんにちは")
         self.assertEqual(load_model_calls[0][3], "ja")
         self.assertEqual(result["provider"], "whisperx")
+
+    def test_qwen_provider_disables_timestamps_without_forced_aligner(self) -> None:
+        captured_calls: list[dict[str, object]] = []
+
+        class FakeResult:
+            language = "Japanese"
+            text = "こんにちは。さようなら。"
+            time_stamps = None
+
+        class FakeModel:
+            def transcribe(self, **kwargs):
+                captured_calls.append(kwargs)
+                return [FakeResult()]
+
+        fake_qwen_module = types.SimpleNamespace(
+            Qwen3ASRModel=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: FakeModel(),
+            )
+        )
+        fake_torch = types.SimpleNamespace(bfloat16="bf16", float32="fp32")
+        config = {
+            "provider": "qwen",
+            "model_name": "qwen3-asr-1.7b",
+            "device": "cpu",
+            "advanced": {"qwen_temperature": 0.0},
+        }
+        provider = QwenASRProvider(config)
+        audio_path = self.config_dir / "qwen-no-aligner.wav"
+        audio_path.write_bytes(b"audio")
+
+        with patch.dict(sys.modules, {"qwen_asr": fake_qwen_module, "torch": fake_torch}, clear=False):
+            with patch("app.asr.providers.qwen.estimate_audio_duration", return_value=10.0):
+                result = provider.transcribe(audio_path, "ja")
+
+        self.assertFalse(captured_calls[0]["return_time_stamps"])
+        self.assertEqual(len(result["segments"]), 2)
+
+    def test_qwen_provider_uses_local_forced_aligner_when_available(self) -> None:
+        init_kwargs: list[dict[str, object]] = []
+
+        class FakeResult:
+            language = "English"
+            text = "hello world"
+            time_stamps = [types.SimpleNamespace(text="hello", start_time=0.0, end_time=0.5)]
+
+        class FakeModel:
+            def transcribe(self, **kwargs):
+                return [FakeResult()]
+
+        fake_qwen_module = types.SimpleNamespace(
+            Qwen3ASRModel=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: init_kwargs.append(kwargs) or FakeModel(),
+            )
+        )
+        fake_torch = types.SimpleNamespace(bfloat16="bf16", float32="fp32")
+        aligner_dir = self.models_dir / "qwen3-forced-aligner"
+        aligner_dir.mkdir(parents=True, exist_ok=True)
+        (aligner_dir / "weights.bin").write_bytes(b"model")
+        config = {
+            "provider": "qwen",
+            "model_name": "qwen3-asr-1.7b",
+            "device": "cpu",
+            "advanced": {"qwen_temperature": 0.0},
+        }
+        provider = QwenASRProvider(config)
+        audio_path = self.config_dir / "qwen-with-aligner.wav"
+        audio_path.write_bytes(b"audio")
+
+        with patch.dict(sys.modules, {"qwen_asr": fake_qwen_module, "torch": fake_torch}, clear=False):
+            provider.transcribe(audio_path, "en")
+
+        self.assertEqual(init_kwargs[0]["forced_aligner"], str(aligner_dir))
+        self.assertIn("forced_aligner_kwargs", init_kwargs[0])
+
+    def test_qwen_forced_aligner_aligns_segments_individually(self) -> None:
+        align_calls: list[dict[str, object]] = []
+
+        class FakeAlignModel:
+            def align(self, audio, text, language):
+                align_calls.append({"audio": audio, "text": text, "language": language})
+                return [[types.SimpleNamespace(text=text, start_time=0.1, end_time=0.6)]]
+
+        aligner = QwenForcedAligner(self.models_dir)
+        audio_path = self.config_dir / "forced-align.wav"
+        audio_path.write_bytes(b"audio")
+        segments = [
+            {"start": 10.0, "end": 12.0, "text": "こんにちは。"},
+            {"start": 20.0, "end": 22.0, "text": "さようなら。"},
+        ]
+
+        with patch.object(QwenForcedAligner, "_get_model", return_value=FakeAlignModel()):
+            with patch("app.asr.aligners.qwen_forced_aligner._load_audio_slice", return_value=("samples", 16000)):
+                aligned = aligner.align(segments, audio_path, "ja", "cpu")
+
+        self.assertEqual(len(align_calls), 2)
+        self.assertEqual(align_calls[0]["text"], "こんにちは。")
+        self.assertEqual(align_calls[1]["text"], "さようなら。")
+        self.assertEqual(len(aligned), 2)
+        self.assertLess(aligned[0]["end"], aligned[1]["start"])
 
     def test_asr_provider_factory_defaults_to_whisperx(self) -> None:
         provider = ASRProviderFactory.create({"model_name": "small", "device": "cpu"})

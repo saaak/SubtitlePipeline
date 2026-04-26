@@ -15,6 +15,7 @@ from typing import Any
 
 import openai
 from openai import OpenAI
+from app.segment_cleaner import clean_segments
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,23 @@ from .asr import (
     WhisperXProvider,
     run_asr,
 )
+from .asr.aligners import QwenForcedAligner, WhisperXAligner
+from .asr.helpers import get_models_root
+from .model_manager import DEFAULT_PROVIDER, infer_provider_from_model_name, normalize_provider_name
+
+STAGE_ALIAS_MAP = {
+    "asr": "run_asr",
+}
+STAGE_PROGRESS = {
+    "extract_audio": 10,
+    "run_asr": 35,
+    "align_segments": 45,
+    "text_process": 55,
+    "translate": 60,
+    "subtitle_render": 95,
+    "output_finalize": 100,
+    "mux": 100,
+}
 
 
 @dataclass(frozen=True)
@@ -97,6 +115,10 @@ class TranslationChunk:
 class TranslationProvider:
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
         raise NotImplementedError
+
+
+def normalize_stage_name(stage: str) -> str:
+    return STAGE_ALIAS_MAP.get(str(stage), str(stage))
 
 
 def build_chunks(
@@ -156,7 +178,30 @@ def strip_code_fence(content: str) -> str:
 
 
 def strip_number_prefix(line: str) -> str:
-    return re.sub(r"^\s*\d+\|", "", line, count=1).strip()
+    """Strip number prefix from translation line.
+
+    Handles formats:
+    - 编号|译文 (half-width pipe)
+    - 编号｜译文 (full-width pipe)
+    - 编号||译文 (double pipe)
+    - 编号. 译文
+    - 编号: 译文 / 编号：译文
+    - 编号译文 (bare number, last resort)
+    - |译文 (bare leading pipe, no number)
+    """
+    # Try numbered formats with delimiters first
+    stripped = re.sub(r"^\s*\d+[|｜.:：]+\s*", "", line, count=1)
+    if stripped != line:
+        # Also strip any remaining leading pipes
+        return stripped.lstrip("|｜").strip()
+
+    # Bare leading pipe(s) with no number prefix
+    if line.strip().startswith("|") or line.strip().startswith("｜"):
+        return line.strip().lstrip("|｜").strip()
+
+    # Last resort: bare number at start (e.g., "9怎么样？")
+    stripped = re.sub(r"^\s*\d+", "", line, count=1)
+    return stripped.strip()
 
 
 @dataclass
@@ -191,16 +236,33 @@ def parse_numbered_lines_ordered(
         normalized = line.strip()
         if not normalized:
             continue
-        # Try to match "编号|译文" format
-        if "|" in normalized:
-            prefix, value = normalized.split("|", 1)
+        # Try to match "编号|译文" or "编号｜译文" format (half-width or full-width pipe)
+        if "|" in normalized or "｜" in normalized:
+            # Replace full-width pipe with half-width for uniform processing
+            normalized_pipe = normalized.replace("｜", "|")
+            prefix, value = normalized_pipe.split("|", 1)
             if prefix.strip().isdigit():
                 index = int(prefix.strip())
                 if index in expected and index not in matches:
-                    matches[index] = value.strip()
+                    cleaned_value = value.strip().lstrip("|｜").strip()
+                    matches[index] = cleaned_value
                 continue
         # Also accept "编号. 译文" or "编号: 译文" as fallback
         m = re.match(r"^\s*(\d+)\s*[.:：]\s*(.+)$", normalized)
+        if m:
+            index = int(m.group(1))
+            if index in expected and index not in matches:
+                matches[index] = m.group(2).strip()
+            continue
+        # Last resort: bare number prefix "编号译文" (no delimiter)
+        m = re.match(r"^\s*(\d+)(\S.*)$", normalized)
+        if m:
+            index = int(m.group(1))
+            if index in expected and index not in matches:
+                matches[index] = m.group(2).strip()
+            continue
+        # Last resort: bare number prefix "编号译文" (LLM forgot the separator)
+        m = re.match(r"^\s*(\d+)(\S.*)$", normalized)
         if m:
             index = int(m.group(1))
             if index in expected and index not in matches:
@@ -578,7 +640,7 @@ def get_intermediates_dir(source_path: Path) -> Path:
 
 
 def _intermediate_filenames() -> tuple[str, ...]:
-    return ("audio.wav", "asr_result.json", "processed_segments.json", "translations.json")
+    return ("audio.wav", "asr_result.json", "aligned_segments.json", "processed_segments.json", "translations.json")
 
 
 def ensure_intermediates_dir(context: TaskContext) -> Path:
@@ -685,9 +747,91 @@ def load_asr_result(context: TaskContext) -> dict[str, Any]:
     return payload
 
 
+def save_aligned_segments(context: TaskContext, payload: list[dict[str, Any]]) -> Path:
+    path = get_intermediate_path(context, "aligned_segments.json", create=True)
+    _write_json(path, payload)
+    return path
+
+
+def load_aligned_segments(context: TaskContext) -> list[dict[str, Any]]:
+    path = get_intermediate_path(context, "aligned_segments.json")
+    if not path.exists():
+        raise PipelineError("缺少 aligned_segments.json，无法继续执行")
+    payload = _read_json(path)
+    if not isinstance(payload, list):
+        raise PipelineError("aligned_segments.json 内容无效，无法继续执行")
+    return payload
+
+
+def _resolve_align_provider(config_snapshot: dict[str, Any]) -> str:
+    whisper_config = config_snapshot.get("whisper", {})
+    return str(whisper_config.get("align_provider", whisper_config.get("align_method", "auto"))).strip().lower() or "auto"
+
+
+def _has_qwen_forced_aligner_model() -> bool:
+    model_dir = get_models_root() / "qwen3-forced-aligner"
+    return model_dir.exists() and any(model_dir.iterdir())
+
+
+def align_segments(
+    context: TaskContext,
+    asr_result: dict[str, Any],
+    audio_path: Path,
+    model_cache: WhisperModelCache | None = None,
+    database: Any = None,
+) -> list[dict[str, Any]]:
+    original_segments = asr_result.get("segments", [])
+    normalized_segments = [
+        {
+            "start": float(segment.get("start", 0.0)),
+            "end": float(segment.get("end", segment.get("start", 0.0))),
+            "text": str(segment.get("text", "")).strip(),
+        }
+        for segment in original_segments
+    ]
+    align_provider = _resolve_align_provider(context.config_snapshot)
+    asr_provider = normalize_provider_name(
+        asr_result.get("provider")
+        or context.config_snapshot["whisper"].get("provider")
+        or infer_provider_from_model_name(str(context.config_snapshot["whisper"].get("model_name", "")), DEFAULT_PROVIDER)
+    )
+    language = str(asr_result.get("language", "")).strip() or None
+
+    if align_provider == "none":
+        if database is not None:
+            database.log(context.task_id, "align_segments", "INFO", "已跳过时间轴对齐，直接使用 ASR 时间戳")
+        return normalized_segments
+
+    selected_provider = align_provider
+    if align_provider == "auto":
+        if asr_provider == "whisperx":
+            selected_provider = "whisperx"
+        elif _has_qwen_forced_aligner_model():
+            selected_provider = "qwen-forced"
+        else:
+            if database is not None:
+                database.log(
+                    context.task_id,
+                    "align_segments",
+                    "WARNING",
+                    "建议下载 qwen3-forced-aligner 以提升时间戳精度，当前使用内置 timestamps 继续",
+                )
+            return normalized_segments
+
+    if selected_provider == "whisperx":
+        return WhisperXAligner(model_cache).align(normalized_segments, audio_path, language, context.config_snapshot["whisper"]["device"])
+    if selected_provider == "qwen-forced":
+        return QwenForcedAligner().align(normalized_segments, audio_path, language, context.config_snapshot["whisper"]["device"])
+    raise PipelineError(f"不支持的对齐 Provider: {selected_provider}")
+
+
 def process_text_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Step 1: Clean segments (remove repetition loops, merge fragments, split long segments, etc.)
+    cleaned = clean_segments(segments)
+
+    # Step 2: Normalize whitespace and add trailing punctuation
     processed: list[dict[str, Any]] = []
-    for segment in segments:
+    for segment in cleaned:
         text = " ".join(str(segment["text"]).split())
         if text and text[-1] not in ".!?。！？":
             text = f"{text}."
@@ -983,14 +1127,16 @@ def mux_subtitle(context: TaskContext, subtitle_paths: list[str]) -> str:
 
 
 def _required_resume_files(task: dict[str, Any], context: TaskContext) -> list[tuple[str, Path]]:
-    stage = str(task["stage"])
+    stage = normalize_stage_name(str(task["stage"]))
     translation_enabled = bool(context.config_snapshot["translation"]["enabled"])
     audio_format = str(context.config_snapshot["whisper"]["audio_format"]).strip().lower()
     files: list[tuple[str, Path]] = []
-    if stage in {"asr", "text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
+    if stage in {"run_asr", "align_segments", "text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
         files.append((f"audio.{audio_format}", get_intermediate_path(context, f"audio.{audio_format}")))
-    if stage in {"text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
+    if stage in {"align_segments", "text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
         files.append(("asr_result.json", get_intermediate_path(context, "asr_result.json")))
+    if stage in {"text_process", "translate", "subtitle_render", "output_finalize", "mux"}:
+        files.append(("aligned_segments.json", get_intermediate_path(context, "aligned_segments.json")))
     if stage in {"translate", "subtitle_render", "output_finalize", "mux"}:
         files.append(("processed_segments.json", get_intermediate_path(context, "processed_segments.json")))
     if translation_enabled and stage in {"subtitle_render", "output_finalize", "mux"}:
@@ -1014,6 +1160,31 @@ def _required_resume_files(task: dict[str, Any], context: TaskContext) -> list[t
     return files
 
 
+def _infer_resume_stage(current_stage: str, context: TaskContext) -> str:
+    stage = normalize_stage_name(current_stage)
+    audio_format = str(context.config_snapshot["whisper"]["audio_format"]).strip().lower()
+    audio_exists = get_intermediate_path(context, f"audio.{audio_format}").exists()
+    asr_exists = get_intermediate_path(context, "asr_result.json").exists()
+    aligned_exists = get_intermediate_path(context, "aligned_segments.json").exists()
+    processed_exists = get_intermediate_path(context, "processed_segments.json").exists()
+    translations_exists = get_intermediate_path(context, "translations.json").exists()
+    artifacts_exist = (context.work_dir / "artifacts.json").exists()
+
+    if stage in {"run_asr", "align_segments", "text_process", "translate", "subtitle_render", "output_finalize", "mux"} and not audio_exists:
+        return "extract_audio"
+    if stage in {"align_segments", "text_process", "translate", "subtitle_render", "output_finalize", "mux"} and not asr_exists:
+        return "run_asr"
+    if stage in {"text_process", "translate", "subtitle_render", "output_finalize", "mux"} and not aligned_exists:
+        return "align_segments"
+    if stage in {"translate", "subtitle_render", "output_finalize", "mux"} and not processed_exists:
+        return "text_process"
+    if bool(context.config_snapshot["translation"]["enabled"]) and stage in {"subtitle_render", "output_finalize", "mux"} and not translations_exists:
+        return "translate"
+    if stage in {"output_finalize", "mux"} and not artifacts_exist and stage == "mux":
+        return "output_finalize"
+    return stage
+
+
 def check_resume_feasibility(task: dict[str, Any]) -> dict[str, Any]:
     snapshot = task.get("config_snapshot")
     if not snapshot:
@@ -1025,8 +1196,9 @@ def check_resume_feasibility(task: dict[str, Any]) -> dict[str, Any]:
         config_snapshot=snapshot,
         work_dir=work_dir,
     )
+    resume_stage = _infer_resume_stage(str(task["stage"]), context)
     missing: list[str] = []
-    files = _required_resume_files(task, context)
+    files = _required_resume_files({"stage": resume_stage}, context)
     for name, path in files:
         if not path.exists():
             missing.append(name)
@@ -1036,4 +1208,4 @@ def check_resume_feasibility(task: dict[str, Any]) -> dict[str, Any]:
                 _read_json(path)
             except Exception:
                 missing.append(name)
-    return {"can_resume": not missing, "missing": missing}
+    return {"can_resume": not missing, "missing": missing, "resume_stage": resume_stage}

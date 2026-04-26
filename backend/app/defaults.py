@@ -48,8 +48,8 @@ DEFAULT_CONFIG = {
         "beam_size": 5,
         "vad_filter": True,
         "vad_threshold": 0.5,
-        # 对齐方法选择
-        "align_method": "auto",  # auto | whisperx | simple | none
+        # 对齐 Provider 选择
+        "align_provider": "auto",  # auto | whisperx | qwen-forced | none
         # 高级配置（Provider 特定）
         "advanced": {
             "whisperx_align_extend": 2,
@@ -60,6 +60,8 @@ DEFAULT_CONFIG = {
             "anime_whisper_dtype": "auto",
             "qwen_temperature": 0.0,
             "qwen_dtype": "auto",
+            "qwen_max_inference_batch_size": 32,
+            "qwen_max_new_tokens": 256,
         },
     },
     "translation": {
@@ -95,7 +97,8 @@ SYSTEM_LEVEL_FIELDS = {
 RESULT_AFFECTING_GROUPS = {"file", "processing", "whisper", "translation", "subtitle", "mux"}
 STAGE_SEQUENCE = [
     "extract_audio",
-    "asr",
+    "run_asr",
+    "align_segments",
     "text_process",
     "translate",
     "subtitle_render",

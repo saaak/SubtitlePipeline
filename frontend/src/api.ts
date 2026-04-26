@@ -45,7 +45,7 @@ export type LogResponse = {
 
 export type RetryMode = 'restart' | 'resume'
 export type BilingualMode = 'merge' | 'separate'
-export type SourceLanguage = 'auto' | 'en' | 'zh' | 'ja'
+export type SourceLanguage = string
 
 export type TranslationContentType =
   | 'general'
@@ -57,13 +57,16 @@ export type TranslationContentType =
   | 'news'
 
 export type ASRProvider = 'whisperx' | 'faster-whisper' | 'anime-whisper' | 'qwen'
-export type AlignMethod = 'auto' | 'whisperx' | 'simple' | 'none'
+export type AlignProvider = 'auto' | 'whisperx' | 'qwen-forced' | 'none'
+export type ModelProvider = ASRProvider | 'qwen-forced'
 
 export type AdvancedConfig = {
   whisperx_align_extend: number
   faster_whisper_word_timestamps: boolean
   anime_whisper_enhance_dialogue: boolean
   qwen_temperature: number
+  qwen_max_inference_batch_size: number
+  qwen_max_new_tokens: number
 }
 
 export type ProviderInfo = {
@@ -90,6 +93,7 @@ export type AppConfig = {
     work_dir: string
   }
   whisper: {
+    provider: ASRProvider
     model_name: string
     device: string
     audio_format: string
@@ -97,7 +101,7 @@ export type AppConfig = {
     beam_size: number
     vad_filter: boolean
     vad_threshold: number
-    align_method: AlignMethod
+    align_provider: AlignProvider
     advanced: AdvancedConfig
   }
   translation: {
@@ -151,10 +155,11 @@ export type ModelItem = {
   progress: number
   current: boolean
   path: string
-  provider: ASRProvider
+  provider: ModelProvider
   display_name: string
   description: string
   tags: string[]
+  model_type: 'asr' | 'aligner'
   error?: string | null
   stalled?: boolean
   manual_download_url?: string | null
@@ -216,9 +221,35 @@ export const retryModeOptions: Array<{ value: RetryMode; label: string }> = [
 
 export const sourceLanguageOptions: Array<{ value: SourceLanguage; label: string }> = [
   { value: 'auto', label: '自动检测' },
-  { value: 'en', label: '英语' },
   { value: 'zh', label: '中文' },
+  { value: 'yue', label: '粤语' },
+  { value: 'en', label: '英语' },
   { value: 'ja', label: '日语' },
+  { value: 'ko', label: '韩语' },
+  { value: 'fr', label: '法语' },
+  { value: 'de', label: '德语' },
+  { value: 'es', label: '西班牙语' },
+  { value: 'pt', label: '葡萄牙语' },
+  { value: 'it', label: '意大利语' },
+  { value: 'ru', label: '俄语' },
+  { value: 'ar', label: '阿拉伯语' },
+  { value: 'th', label: '泰语' },
+  { value: 'vi', label: '越南语' },
+  { value: 'id', label: '印尼语' },
+  { value: 'tr', label: '土耳其语' },
+  { value: 'hi', label: '印地语' },
+  { value: 'ms', label: '马来语' },
+  { value: 'nl', label: '荷兰语' },
+  { value: 'sv', label: '瑞典语' },
+  { value: 'da', label: '丹麦语' },
+  { value: 'fi', label: '芬兰语' },
+  { value: 'pl', label: '波兰语' },
+  { value: 'cs', label: '捷克语' },
+  { value: 'fil', label: '菲律宾语' },
+  { value: 'fa', label: '波斯语' },
+  { value: 'el', label: '希腊语' },
+  { value: 'ro', label: '罗马尼亚语' },
+  { value: 'hu', label: '匈牙利语' },
 ]
 
 export const asrProviderOptions: Array<{ value: ASRProvider; label: string }> = [
@@ -245,6 +276,7 @@ export const defaultAppConfig: AppConfig = {
     work_dir: '/config/work',
   },
   whisper: {
+    provider: 'whisperx',
     model_name: 'whisperx-small',
     device: 'auto',
     audio_format: 'wav',
@@ -252,17 +284,19 @@ export const defaultAppConfig: AppConfig = {
     beam_size: 5,
     vad_filter: true,
     vad_threshold: 0.5,
-    align_method: 'auto',
+    align_provider: 'auto',
     advanced: {
       whisperx_align_extend: 2,
       faster_whisper_word_timestamps: false,
       anime_whisper_enhance_dialogue: true,
       qwen_temperature: 0,
+      qwen_max_inference_batch_size: 32,
+      qwen_max_new_tokens: 256,
     },
   },
   translation: {
     enabled: true,
-    target_languages: ['zh-CN'],
+    target_languages: ['zh'],
     max_retries: 2,
     timeout_seconds: 30,
     api_base_url: 'https://api.openai.com',

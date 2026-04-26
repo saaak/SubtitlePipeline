@@ -1,0 +1,238 @@
+"""
+ASR 片段后处理模块 - 保守策略
+只修复明确可以改善的问题，不试图修复 ASR 模型本身的错误
+"""
+
+import re
+from typing import Any
+
+
+def fix_timestamp_anomalies(segment: dict[str, Any]) -> dict[str, Any]:
+    """
+    修复时间戳异常
+    - start >= end: 设置最小持续时间 0.1s
+    - 过多小数位: 四舍五入到 0.01s
+    """
+    start = round(float(segment["start"]), 2)
+    end = round(float(segment["end"]), 2)
+
+    if end <= start:
+        end = start + 0.1
+
+    return {**segment, "start": start, "end": end}
+
+
+def detect_repetition_loop(text: str, min_repeat: int = 4) -> bool:
+    """
+    检测重复循环（るるるる / 壊れた壊れた）
+    使用保守阈值避免误杀
+    """
+    # 单字符重复 >= 4次
+    if re.search(r'(.)\1{' + str(min_repeat - 1) + r',}', text):
+        return True
+
+    # 双字符重复 >= 3次
+    if re.search(r'(..)\1{2,}', text):
+        return True
+
+    # 三字符重复 >= 2次
+    if re.search(r'(...)\1{2,}', text):
+        return True
+
+    return False
+
+
+def split_long_segment(
+    segment: dict[str, Any],
+    max_duration: float = 7.0,
+) -> list[dict[str, Any]]:
+    """
+    分割超长片段
+    基于时长硬分割，尽量在标点处断开
+    """
+    duration = segment["end"] - segment["start"]
+    if duration <= max_duration:
+        return [segment]
+
+    text = str(segment["text"])
+    num_parts = int(duration / max_duration) + 1
+
+    # 尝试在标点处分割
+    punctuation = r'[。！？.!?、，,]'
+    split_points = [m.end() for m in re.finditer(punctuation, text)]
+
+    if not split_points:
+        # 没有标点，按字符数均分
+        chars_per_part = len(text) // num_parts
+        split_points = [i * chars_per_part for i in range(1, num_parts)]
+
+    # 选择最接近理想分割点的标点位置
+    ideal_points = [len(text) * i // num_parts for i in range(1, num_parts)]
+    selected_points = []
+    for ideal in ideal_points:
+        closest = min(split_points, key=lambda x: abs(x - ideal), default=ideal)
+        selected_points.append(closest)
+        split_points = [p for p in split_points if p > closest]
+
+    # 生成分割后的片段，时间按字符比例分配
+    result = []
+    start_time = segment["start"]
+    time_per_char = duration / max(len(text), 1)
+
+    boundaries = [0] + selected_points + [len(text)]
+    for i in range(len(boundaries) - 1):
+        part_text = text[boundaries[i]:boundaries[i + 1]].strip()
+        if not part_text:
+            continue
+
+        part_start = start_time + boundaries[i] * time_per_char
+        part_end = start_time + boundaries[i + 1] * time_per_char
+        # 确保每个分片不超过 max_duration
+        if part_end - part_start > max_duration:
+            part_end = part_start + max_duration
+
+        result.append({
+            "start": round(part_start, 2),
+            "end": round(part_end, 2),
+            "text": part_text,
+        })
+
+    return result if result else [segment]
+
+
+def merge_short_segments(
+    segments: list[dict[str, Any]],
+    max_chars: int = 5,
+    max_duration: float = 0.8,
+    max_gap: float = 3.0,
+) -> list[dict[str, Any]]:
+    """
+    合并孤立短片段到相邻片段（方案A）。
+
+    针对强制对齐器把单词级别单独切出来的情况（如 し / ます / 横山 / さん / 具合）。
+    条件：文本 <= max_chars 字符 且 时长 <= max_duration 秒。
+    合并方向：选 gap 更小的一侧；两侧都超过 max_gap 则保留原样（孤立声响不合并）。
+    多次迭代直到无变化。
+    """
+    if not segments:
+        return []
+
+    result = [dict(seg) for seg in segments]
+    changed = True
+    while changed:
+        changed = False
+        i = 0
+        new_result: list[dict[str, Any]] = []
+        while i < len(result):
+            seg = result[i]
+            duration = seg["end"] - seg["start"]
+            text = str(seg["text"]).strip()
+
+            is_short = duration <= max_duration and len(text) <= max_chars
+
+            if is_short:
+                gap_prev = (seg["start"] - new_result[-1]["end"]) if new_result else float("inf")
+                gap_next = (result[i + 1]["start"] - seg["end"]) if i + 1 < len(result) else float("inf")
+
+                if gap_prev <= max_gap and gap_prev <= gap_next:
+                    # 合并到前一个
+                    new_result[-1]["text"] = str(new_result[-1]["text"]) + str(seg["text"])
+                    new_result[-1]["end"] = seg["end"]
+                    changed = True
+                    i += 1
+                    continue
+                elif gap_next <= max_gap:
+                    # 合并到下一个
+                    next_seg = dict(result[i + 1])
+                    next_seg["text"] = str(seg["text"]) + str(next_seg["text"])
+                    next_seg["start"] = seg["start"]
+                    result[i + 1] = next_seg
+                    changed = True
+                    i += 1
+                    continue
+
+            new_result.append(seg)
+            i += 1
+
+        result = new_result
+
+    return result
+
+
+def remove_consecutive_duplicates(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    移除连续重复的句子
+    """
+    if not segments:
+        return []
+
+    result = [segments[0]]
+    for seg in segments[1:]:
+        if seg["text"] != result[-1]["text"]:
+            result.append(seg)
+
+    return result
+
+
+def clean_segments(
+    segments: list[dict[str, Any]],
+    max_duration: float = 7.0,
+    max_gap: float = 0.5,
+) -> list[dict[str, Any]]:
+    """
+    清理 ASR 片段 - 保守策略
+
+    处理流程：
+    1. 修复时间戳异常
+    2. 过滤重复循环
+    3. 合并紧邻碎片（gap < 0.5s）
+    4. 合并孤立短片段（gap < 3.0s，方案A）
+    5. 分割超长片段
+    6. 移除连续重复
+    """
+    if not segments:
+        return []
+
+    # Step 1: 修复时间戳
+    segments = [fix_timestamp_anomalies(seg) for seg in segments]
+
+    # Step 2: 过滤重复循环
+    filtered = []
+    for seg in segments:
+        text = str(seg["text"]).strip()
+        if not text:
+            continue
+        if detect_repetition_loop(text):
+            continue
+        filtered.append(seg)
+
+    # Step 3: 合并紧邻碎片（优先合并到前一个片段）
+    merged = []
+    for seg in filtered:
+        duration = seg["end"] - seg["start"]
+        text = str(seg["text"]).strip()
+
+        is_fragment = duration < 1.0 and len(text) < 3
+
+        if is_fragment and merged:
+            prev_seg = merged[-1]
+            gap = seg["start"] - prev_seg["end"]
+            if gap < max_gap:
+                prev_seg["text"] = str(prev_seg["text"]) + str(seg["text"])
+                prev_seg["end"] = seg["end"]
+                continue
+
+        merged.append(seg)
+
+    # Step 4: 合并孤立短片段（宽松 gap 阈值）
+    merged = merge_short_segments(merged)
+
+    # Step 5: 分割超长片段
+    split_result = []
+    for seg in merged:
+        split_result.extend(split_long_segment(seg, max_duration))
+
+    # Step 6: 移除连续重复
+    result = remove_consecutive_duplicates(split_result)
+
+    return result

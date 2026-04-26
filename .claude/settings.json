@@ -30,7 +30,11 @@
       "Bash(ls -la backend/app/*.py)",
       "Read(//c/code/**)",
       "Bash(openspec new:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(python -m pytest tests/test_segment_cleaner.py -v)",
+      "Bash(python -m unittest tests.test_segment_cleaner -v)"
     ],
     "additionalDirectories": [
       "C:\\code\\trae-projects\\SubPipeline\\openspec\\changes"
