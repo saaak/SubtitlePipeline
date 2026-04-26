@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useMemo, useState } from 'react'
+﻿import { ReactNode, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import {
@@ -38,6 +38,25 @@ const initialExpandedState: Record<string, boolean> = {
 }
 
 type StepTone = 'success' | 'warning' | 'neutral' | 'muted'
+
+const computeTypeOptions = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'float32', label: 'FP32 / float32' },
+  { value: 'float16', label: 'FP16 / float16' },
+  { value: 'bfloat16', label: 'BF16 / bfloat16' },
+  { value: 'int8', label: 'INT8' },
+  { value: 'int8_float16', label: 'INT8 + FP16' },
+  { value: 'int8_float32', label: 'INT8 + FP32' },
+  { value: 'int8_bfloat16', label: 'INT8 + BF16' },
+  { value: 'int16', label: 'INT16' },
+]
+
+const torchDtypeOptions = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'float32', label: 'FP32 / float32' },
+  { value: 'float16', label: 'FP16 / float16' },
+  { value: 'bfloat16', label: 'BF16 / bfloat16' },
+]
 
 function TagEditor({
   label,
@@ -620,24 +639,62 @@ export function SettingsPage() {
                   <input type="text" value={config.whisper.device} readOnly disabled />
                 </label>
                 {currentProvider === 'whisperx' && (
-                  <label>
-                    <span>WhisperX 对齐扩展时长</span>
-                    <input type="number" value={config.whisper.advanced.whisperx_align_extend} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_align_extend: Number(event.target.value) })} />
-                  </label>
+                  <>
+                    <label>
+                      <span>WhisperX 对齐扩展时长</span>
+                      <input type="number" value={config.whisper.advanced.whisperx_align_extend} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_align_extend: Number(event.target.value) })} />
+                    </label>
+                    <label>
+                      <span>WhisperX Compute Type</span>
+                      <select value={config.whisper.advanced.whisperx_compute_type ?? 'auto'} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, whisperx_compute_type: event.target.value })}>
+                        {computeTypeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
                 )}
                 {currentProvider === 'faster-whisper' && (
-                  <label className="switch-row">
-                    <span>Faster-Whisper 词级时间戳</span>
-                    <input type="checkbox" checked={config.whisper.advanced.faster_whisper_word_timestamps} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_word_timestamps: event.target.checked })} />
-                  </label>
+                  <>
+                    <label>
+                      <span>Faster-Whisper Compute Type</span>
+                      <select value={config.whisper.advanced.faster_whisper_compute_type ?? 'auto'} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_compute_type: event.target.value })}>
+                        {computeTypeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="switch-row">
+                      <span>Faster-Whisper 词级时间戳</span>
+                      <input type="checkbox" checked={config.whisper.advanced.faster_whisper_word_timestamps} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, faster_whisper_word_timestamps: event.target.checked })} />
+                    </label>
+                  </>
                 )}
                 {currentProvider === 'anime-whisper' && (
-                  <label className="switch-row">
-                    <span>Anime-Whisper 对话增强</span>
-                    <input type="checkbox" checked={config.whisper.advanced.anime_whisper_enhance_dialogue} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_enhance_dialogue: event.target.checked })} />
-                  </label>
+                  <>
+                    <label>
+                      <span>Anime-Whisper DType</span>
+                      <select value={config.whisper.advanced.anime_whisper_dtype ?? 'auto'} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_dtype: event.target.value })}>
+                        {torchDtypeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="switch-row">
+                      <span>Anime-Whisper 对话增强</span>
+                      <input type="checkbox" checked={config.whisper.advanced.anime_whisper_enhance_dialogue} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, anime_whisper_enhance_dialogue: event.target.checked })} />
+                    </label>
+                  </>
                 )}
                 {currentProvider === 'qwen' && (<>
+                  <label>
+                    <span>Qwen DType</span>
+                    <select value={config.whisper.advanced.qwen_dtype ?? 'auto'} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_dtype: event.target.value })}>
+                      {torchDtypeOptions.map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
                   <label>
                     <span>Qwen Temperature</span>
                     <input type="number" step="0.1" value={config.whisper.advanced.qwen_temperature} onChange={(event) => setField('whisper', 'advanced', { ...config.whisper.advanced, qwen_temperature: Number(event.target.value) })} />
