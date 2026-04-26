@@ -6,6 +6,7 @@ on:
       - main
     tags:
       - "v*"
+      - "V*"
   workflow_dispatch:
 
 env:
@@ -37,7 +38,11 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=match,pattern=^[vV](.*)$,group=1
+            type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=manual-${{ github.run_number }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-
 
       - name: Build and push CPU image
         uses: docker/build-push-action@v6
@@ -75,7 +80,11 @@ jobs:
           tags: |
             type=semver,pattern={{version}},suffix=-gpu
             type=semver,pattern={{major}}.{{minor}},suffix=-gpu
+            type=match,pattern=^[vV](.*)$,group=1,suffix=-gpu
+            type=ref,event=tag,suffix=-gpu
             type=raw,value=latest-gpu,enable={{is_default_branch}}
+            type=raw,value=manual-${{ github.run_number }}-gpu,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-,suffix=-gpu
 
       - name: Build and push GPU image
         uses: docker/build-push-action@v6
