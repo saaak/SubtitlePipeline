@@ -26,17 +26,7 @@ class WhisperXProvider(ASRProvider):
             raise PipelineError("whisperx 未安装，无法执行真实识别") from exc
         model = self.model_cache.get_model(self.model_name, self.device, language)
         result = model.transcribe(str(audio_path))
-
-        should_align = self.align_method in ("auto", "whisperx")
-        if not should_align or self.align_method == "none":
-            return {
-                "segments": normalize_asr_segments(result.get("segments", [])),
-                "language": str(result.get("language", language or "auto")),
-            }
-
-        align_model, metadata = self.model_cache.get_align_model(str(result.get("language", "en")), self.device)
-        aligned = whisperx.align(result["segments"], align_model, metadata, str(audio_path), self.device)
         return {
-            "segments": normalize_asr_segments(aligned["segments"]),
+            "segments": normalize_asr_segments(result.get("segments", [])),
             "language": str(result.get("language", language or "auto")),
         }

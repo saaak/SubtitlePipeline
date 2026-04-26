@@ -12,7 +12,12 @@ from typing import Any, Iterator
 logger = logging.getLogger(__name__)
 
 from .defaults import RESULT_AFFECTING_GROUPS, SYSTEM_LEVEL_FIELDS, copy_default_config, detect_device
-from .pipeline import check_resume_feasibility, cleanup_intermediates, cleanup_work_dir_intermediates
+from .pipeline import (
+    check_resume_feasibility,
+    cleanup_intermediates,
+    cleanup_work_dir_intermediates,
+    normalize_stage_name,
+)
 
 
 OBSOLETE_CONFIG_FIELDS = {
@@ -25,6 +30,7 @@ OBSOLETE_CONFIG_FIELDS = {
     ("translation", "fail_languages"),
     ("subtitle", "text_process_style"),
     ("whisper", "align_model"),
+    ("whisper", "align_method"),
     ("mux", "output_dir"),
     ("logging", "page_size"),
 }
@@ -54,6 +60,31 @@ def _load_config_value(connection: sqlite3.Connection, group_name: str, key_name
     if row is None:
         return None
     return json.loads(row["value_json"])
+
+
+def _normalize_legacy_align_method(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    legacy_mapping = {
+        "whisperx": "auto",
+        "auto": "auto",
+        "simple": "none",
+        "none": "none",
+    }
+    return legacy_mapping.get(normalized, normalized or "auto")
+
+
+def _normalize_align_provider(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    supported = {"auto", "whisperx", "qwen-forced", "none"}
+    return normalized if normalized in supported else "auto"
+
+
+def _migrate_whisper_config_dict(whisper_config: dict[str, Any]) -> None:
+    if "align_provider" in whisper_config:
+        whisper_config["align_provider"] = _normalize_align_provider(whisper_config.get("align_provider"))
+    elif "align_method" in whisper_config:
+        whisper_config["align_provider"] = _normalize_legacy_align_method(whisper_config.get("align_method"))
+    whisper_config.pop("align_method", None)
 
 
 @dataclass
@@ -194,6 +225,19 @@ class Database:
                     """,
                     (json.dumps(migrated_output_to_source_dir), now),
                 )
+            legacy_align_method = _load_config_value(connection, "whisper", "align_method")
+            align_provider = _load_config_value(connection, "whisper", "align_provider")
+            if legacy_align_method is not None and align_provider is None:
+                connection.execute(
+                    """
+                    INSERT INTO system_config (group_name, key_name, value_json, scope, restart_required, updated_at)
+                    VALUES ('whisper', 'align_provider', ?, 'runtime', 0, ?)
+                    ON CONFLICT(group_name, key_name)
+                    DO UPDATE SET value_json = excluded.value_json,
+                                  updated_at = excluded.updated_at
+                    """,
+                    (json.dumps(_normalize_legacy_align_method(legacy_align_method)), now),
+                )
             connection.execute(
                 """
                 UPDATE tasks
@@ -265,6 +309,8 @@ class Database:
             if row["group_name"] == "system":
                 continue
             defaults.setdefault(row["group_name"], {})[row["key_name"]] = json.loads(row["value_json"])
+        whisper_config = defaults.setdefault("whisper", {})
+        _migrate_whisper_config_dict(whisper_config)
         if defaults.get("whisper", {}).get("device") == "auto":
             defaults["whisper"]["device"] = detect_device()
         defaults["meta"] = {"restart_required": restart_required}
@@ -279,6 +325,11 @@ class Database:
                 if not isinstance(group_values, dict):
                     continue
                 for key_name, value in group_values.items():
+                    if group_name == "whisper" and key_name == "align_method":
+                        key_name = "align_provider"
+                        value = _normalize_legacy_align_method(value)
+                    elif group_name == "whisper" and key_name == "align_provider":
+                        value = _normalize_align_provider(value)
                     if (group_name, key_name) in READ_ONLY_CONFIG_FIELDS:
                         continue
                     if group_name not in current or key_name not in current[group_name]:
@@ -412,7 +463,13 @@ class Database:
                 [*filters, page_size, offset],
             ).fetchall()
         return PageResult(
-            [dict(row) for row in rows],
+            [
+                {
+                    **dict(row),
+                    "stage": normalize_stage_name(str(row["stage"])),
+                }
+                for row in rows
+            ],
             page,
             page_size,
             total,
@@ -457,8 +514,11 @@ class Database:
         if not row:
             return None
         task = dict(row)
+        task["stage"] = normalize_stage_name(str(task["stage"]))
         task["config_snapshot"] = json.loads(task["config_snapshot"]) if task["config_snapshot"] else None
         task["result_payload"] = json.loads(task["result_payload"]) if task["result_payload"] else None
+        if task["config_snapshot"] and isinstance(task["config_snapshot"].get("whisper"), dict):
+            _migrate_whisper_config_dict(task["config_snapshot"]["whisper"])
         return task
 
     def get_logs(self, task_id: int, page: int, page_size: int) -> PageResult:
@@ -519,9 +579,11 @@ class Database:
             if not feasibility["can_resume"]:
                 missing = ", ".join(feasibility["missing"])
                 raise ValueError(f"中间文件缺失，无法继续执行: {missing}")
+            resume_stage = str(feasibility.get("resume_stage", normalize_stage_name(task["stage"])))
         else:
             cleanup_intermediates(Path(task["file_path"]))
             cleanup_work_dir_intermediates(self._resolve_task_work_dir(task_id, task["config_snapshot"]))
+            resume_stage = "queued"
         with self.connect() as connection:
             connection.execute(
                 """
@@ -538,7 +600,7 @@ class Database:
                 WHERE id = ? AND status IN ('failed', 'cancelled', 'done')
                 """,
                 (
-                    "queued" if mode == "restart" else task["stage"],
+                    resume_stage,
                     0 if mode == "restart" else float(task["progress"]),
                     utc_now(),
                     task_id,
@@ -667,7 +729,7 @@ class Database:
             ).fetchone()
             if not row:
                 return None
-            start_stage = "extract_audio" if row["stage"] == "queued" else row["stage"]
+            start_stage = "extract_audio" if row["stage"] == "queued" else normalize_stage_name(str(row["stage"]))
             connection.execute(
                 """
                 UPDATE tasks
@@ -761,6 +823,8 @@ class Database:
                 if not feasibility["can_resume"]:
                     retry_mode = "restart"
                     details["resume_missing"] = feasibility["missing"]
+                else:
+                    stage = str(feasibility.get("resume_stage", normalize_stage_name(stage)))
         if should_retry and retry_mode == "restart":
             cleanup_intermediates(Path(task["file_path"]))
             cleanup_work_dir_intermediates(self._resolve_task_work_dir(task_id, task["config_snapshot"]))

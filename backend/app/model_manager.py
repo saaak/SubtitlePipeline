@@ -36,6 +36,7 @@ class ModelSpec:
     display_name: str
     description: str
     tags: tuple[str, ...]
+    model_type: str = "asr"
 
 
 @dataclass
@@ -73,6 +74,12 @@ PROVIDER_INFO: dict[str, dict[str, Any]] = {
         "description": "Qwen3-ASR 系列支持多语言识别、语言检测与时间戳预测。",
         "features": ["multilingual", "language id", "timestamps"],
         "best_for": "多语言混合内容、长音频和需要更强语言覆盖的场景",
+    },
+    "qwen-forced": {
+        "display_name": "Qwen 强制对齐",
+        "description": "Qwen3-ForcedAligner 提供字符级时间轴对齐。",
+        "features": ["aligner", "character-level", "multilingual"],
+        "best_for": "非 WhisperX ASR 的精细时间戳对齐",
     },
 }
 
@@ -166,6 +173,17 @@ KNOWN_MODELS = (
         "Qwen3 ASR 1.7B",
         "高精度 Qwen3-ASR，支持更强的复杂场景识别。",
         ("multilingual", "accurate", "timestamps"),
+    ),
+    ModelSpec(
+        "qwen3-forced-aligner",
+        "Qwen/Qwen3-ForcedAligner-0.6B",
+        "1.3 GB",
+        1331 * 1024 * 1024,
+        "qwen-forced",
+        "Qwen3 强制对齐",
+        "通用强制对齐模型，字符级时间戳，支持中英多语言。",
+        ("aligner", "multilingual", "character-level"),
+        "aligner",
     ),
 )
 KNOWN_MODELS_BY_NAME = {spec.name: spec for spec in KNOWN_MODELS}
@@ -272,6 +290,7 @@ class ModelManager:
                     "display_name": spec.display_name,
                     "description": spec.description,
                     "tags": list(spec.tags),
+                    "model_type": spec.model_type,
                     "error": state.error if state and state.error else None,
                     "stalled": bool(state and state.stalled),
                     "manual_download_url": state.manual_download_url if state else self._manual_download_url(spec),
@@ -393,7 +412,7 @@ class ModelManager:
         if current_size <= 0:
             return 0
         ratio = min(current_size / estimated_size_bytes, 0.99)
-        return int(ratio * 100)
+        return max(1, int(ratio * 100))
 
     def _is_installed(self, model_dir: Path) -> bool:
         if not model_dir.exists() or not model_dir.is_dir():

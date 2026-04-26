@@ -41,7 +41,7 @@ def run_asr(
     model_name = canonical_whisper_config["model_name"]
     device = canonical_whisper_config["device"]
     if database is not None:
-        database.log(context.task_id, "asr", "INFO", f"ASR 配置: 模型={model_name}, Provider={provider_name}, 设备={device}")
+        database.log(context.task_id, "run_asr", "INFO", f"ASR 配置: 模型={model_name}, Provider={provider_name}, 设备={device}")
 
     provider = ASRProviderFactory.create(canonical_whisper_config, model_cache or WhisperModelCache())
     result = provider.transcribe(audio_path, language_hint)
@@ -49,7 +49,7 @@ def run_asr(
     if database is not None:
         database.log(
             context.task_id,
-            "asr",
+            "run_asr",
             "INFO",
             f"ASR 完成: 识别到 {len(result.get('segments', []))} 个片段, 语言={result.get('language', 'unknown')}",
         )

@@ -14,6 +14,7 @@ const modelSeries = [
   { id: 'faster-whisper', label: 'Faster-Whisper 系列', description: '轻量快速推理' },
   { id: 'anime-whisper', label: 'Anime-Whisper 系列', description: '动漫日语优化' },
   { id: 'qwen', label: 'Qwen 系列', description: '多语言 LLM-based' },
+  { id: 'qwen-forced', label: 'Qwen 对齐', description: '独立强制对齐模型' },
 ]
 
 export function ModelManagerPage() {
@@ -21,6 +22,7 @@ export function ModelManagerPage() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busyModel, setBusyModel] = useState('')
+  const [activeTab, setActiveTab] = useState<'asr' | 'aligner'>('asr')
   const [selectedSeries, setSelectedSeries] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -40,15 +42,27 @@ export function ModelManagerPage() {
   )
 
   const filteredModels = useMemo(() => {
-    if (!selectedSeries) return data.items
-    return data.items.filter((item) => item.provider === selectedSeries)
-  }, [data.items, selectedSeries])
+    const byTab = data.items.filter((item) => item.model_type === activeTab)
+    if (!selectedSeries) return byTab
+    return byTab.filter((item) => item.provider === selectedSeries)
+  }, [activeTab, data.items, selectedSeries])
 
   const availableSeries = useMemo(() => {
     const providers = new Set<string>()
-    data.items.forEach((item) => providers.add(item.provider))
+    data.items
+      .filter((item) => item.model_type === activeTab)
+      .forEach((item) => providers.add(item.provider))
     return modelSeries.filter((series) => providers.has(series.id))
-  }, [data.items])
+  }, [activeTab, data.items])
+
+  const counts = useMemo(
+    () => ({
+      asr: data.items.filter((item) => item.model_type === 'asr').length,
+      aligner: data.items.filter((item) => item.model_type === 'aligner').length,
+    }),
+    [data.items],
+  )
+  const activeTabCount = activeTab === 'asr' ? counts.asr : counts.aligner
 
   const runAction = async (model: ModelItem, action: 'download' | 'delete' | 'activate') => {
     setBusyModel(model.name)
@@ -131,13 +145,38 @@ export function ModelManagerPage() {
 
       <div className="card">
         <div className="card-header">
-          <h2>所有模型</h2>
+          <div>
+            <h2>所有模型</h2>
+            <p>按识别模型和对齐模型分类查看，筛选栏固定左对齐。</p>
+          </div>
+        </div>
+        <div className="model-filter-panel">
+          <div className="tab-filter">
+            <button
+              className={activeTab === 'asr' ? 'active' : ''}
+              onClick={() => {
+                setActiveTab('asr')
+                setSelectedSeries(null)
+              }}
+            >
+              识别模型 ({counts.asr})
+            </button>
+            <button
+              className={activeTab === 'aligner' ? 'active' : ''}
+              onClick={() => {
+                setActiveTab('aligner')
+                setSelectedSeries(null)
+              }}
+            >
+              对齐模型 ({counts.aligner})
+            </button>
+          </div>
           <div className="tag-filter">
             <button
               className={selectedSeries === null ? 'active' : ''}
               onClick={() => setSelectedSeries(null)}
             >
-              全部 ({data.items.length})
+              全部 ({activeTabCount})
             </button>
             {availableSeries.map((series) => (
               <button
@@ -157,6 +196,7 @@ export function ModelManagerPage() {
               <div className="table-main">
                 <strong>{item.display_name}</strong>
                 {item.current ? <span className="status-chip installed">当前使用</span> : null}
+                <span className="status-chip not_installed">{item.model_type === 'asr' ? '识别' : '对齐'}</span>
               </div>
               <span className="muted">{item.description}</span>
               <div className="status-stack">
@@ -192,7 +232,7 @@ export function ModelManagerPage() {
                   下载
                 </button>
                 <button
-                  disabled={item.status !== 'installed' || item.current || busyModel === item.name}
+                  disabled={item.model_type !== 'asr' || item.status !== 'installed' || item.current || busyModel === item.name}
                   onClick={() => void runAction(item, 'activate')}
                 >
                   切换
@@ -214,7 +254,7 @@ export function ModelManagerPage() {
         <ul className="simple-list">
           <li>下载中的模型会自动展示进度，页面每 2 秒刷新一次。</li>
           <li>若下载超过一段时间没有进度，页面会给出超时提示与对应模型的手动下载地址。</li>
-          <li>切换模型后会标记需要重启，任务页面会提示是否存在系统级变更。</li>
+          <li>识别模型支持切换激活；对齐模型用于时间轴对齐步骤，不会替换当前 ASR 模型。</li>
           <li>
             若首次部署后尚未完成初始化，可前往 <Link to="/setup">引导向导</Link> 完成模型准备与翻译配置。
           </li>
