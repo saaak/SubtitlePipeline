@@ -17,7 +17,14 @@ if str(ROOT) not in sys.path:
 
 from fastapi.testclient import TestClient
 
-from app.asr import ASRProviderFactory, FasterWhisperProvider, WhisperModelCache, WhisperXProvider, run_asr
+from app.asr import (
+    ASRProviderFactory,
+    AnimeWhisperProvider,
+    FasterWhisperProvider,
+    WhisperModelCache,
+    WhisperXProvider,
+    run_asr,
+)
 from app.asr.aligners.qwen_forced_aligner import QwenForcedAligner
 from app.asr.providers.qwen import QwenASRProvider
 from app.main import create_app
@@ -821,6 +828,24 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(load_model_calls[1][3], "ja")
         self.assertEqual(len(load_align_calls), 1)
 
+    def test_whisperx_compute_type_is_passed_to_load_model(self) -> None:
+        load_model_calls: list[dict[str, object]] = []
+
+        class FakeModel:
+            pass
+
+        def fake_load_model(name: str, device: str, **kwargs):
+            load_model_calls.append({"name": name, "device": device, **kwargs})
+            return FakeModel()
+
+        fake_whisperx = types.SimpleNamespace(load_model=fake_load_model)
+        cache = WhisperModelCache()
+        with patch.dict(sys.modules, {"whisperx": fake_whisperx}, clear=False):
+            cache.get_model("whisperx-small", "cuda", compute_type="fp32")
+
+        self.assertEqual(load_model_calls[0]["device"], "cuda")
+        self.assertEqual(load_model_calls[0]["compute_type"], "float32")
+
     def test_run_asr_passes_source_language_to_whisper_model(self) -> None:
         load_model_calls: list[tuple[str, str, str, str | None]] = []
 
@@ -983,6 +1008,85 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
             }
         )
         self.assertTrue(provider.supports_model("faster-whisper-large-v3"))
+
+    def test_precision_config_is_passed_to_faster_whisper(self) -> None:
+        load_calls: list[dict[str, object]] = []
+
+        class FakeWhisperModel:
+            def __init__(self, model_reference: str, device: str, compute_type: str) -> None:
+                load_calls.append(
+                    {
+                        "model_reference": model_reference,
+                        "device": device,
+                        "compute_type": compute_type,
+                    }
+                )
+
+        fake_faster_whisper = types.SimpleNamespace(WhisperModel=FakeWhisperModel)
+        provider = FasterWhisperProvider(
+            {
+                "provider": "faster-whisper",
+                "model_name": "faster-whisper-small",
+                "device": "cuda",
+                "advanced": {"faster_whisper_compute_type": "fp32"},
+            }
+        )
+
+        with patch.dict(sys.modules, {"faster_whisper": fake_faster_whisper}, clear=False):
+            provider._get_model()
+
+        self.assertEqual(load_calls[0]["device"], "cuda")
+        self.assertEqual(load_calls[0]["compute_type"], "float32")
+
+    def test_precision_config_is_passed_to_anime_whisper(self) -> None:
+        pipeline_calls: list[dict[str, object]] = []
+        fake_torch = types.SimpleNamespace(float16="torch.float16", bfloat16="torch.bfloat16", float32="torch.float32")
+
+        def fake_pipeline(**kwargs):
+            pipeline_calls.append(kwargs)
+            return object()
+
+        fake_transformers = types.SimpleNamespace(pipeline=fake_pipeline)
+        provider = AnimeWhisperProvider(
+            {
+                "provider": "anime-whisper",
+                "model_name": "anime-whisper",
+                "device": "cuda",
+                "advanced": {"anime_whisper_dtype": "fp32"},
+            }
+        )
+
+        with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}, clear=False):
+            provider._get_pipeline()
+
+        self.assertEqual(pipeline_calls[0]["device"], 0)
+        self.assertEqual(pipeline_calls[0]["torch_dtype"], "torch.float32")
+
+    def test_precision_config_is_passed_to_qwen(self) -> None:
+        load_calls: list[dict[str, object]] = []
+        fake_torch = types.SimpleNamespace(float16="torch.float16", bfloat16="torch.bfloat16", float32="torch.float32")
+
+        class FakeQwen3ASRModel:
+            @classmethod
+            def from_pretrained(cls, model_reference: str, **kwargs):
+                load_calls.append({"model_reference": model_reference, **kwargs})
+                return object()
+
+        fake_qwen_asr = types.SimpleNamespace(Qwen3ASRModel=FakeQwen3ASRModel)
+        provider = QwenASRProvider(
+            {
+                "provider": "qwen",
+                "model_name": "qwen3-asr-0.6b",
+                "device": "cuda",
+                "advanced": {"qwen_dtype": "fp32"},
+            }
+        )
+
+        with patch.dict(sys.modules, {"torch": fake_torch, "qwen_asr": fake_qwen_asr}, clear=False):
+            provider._get_model()
+
+        self.assertEqual(load_calls[0]["device_map"], "cuda:0")
+        self.assertEqual(load_calls[0]["dtype"], "torch.float32")
 
     @patch("app.pipeline.OpenAI")
     def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:

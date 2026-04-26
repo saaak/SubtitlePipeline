@@ -62,9 +62,13 @@ export type ModelProvider = ASRProvider | 'qwen-forced'
 
 export type AdvancedConfig = {
   whisperx_align_extend: number
+  whisperx_compute_type: string
   faster_whisper_word_timestamps: boolean
+  faster_whisper_compute_type: string
   anime_whisper_enhance_dialogue: boolean
+  anime_whisper_dtype: string
   qwen_temperature: number
+  qwen_dtype: string
   qwen_max_inference_batch_size: number
   qwen_max_new_tokens: number
 }
@@ -287,9 +291,13 @@ export const defaultAppConfig: AppConfig = {
     align_provider: 'auto',
     advanced: {
       whisperx_align_extend: 2,
+      whisperx_compute_type: 'auto',
       faster_whisper_word_timestamps: false,
+      faster_whisper_compute_type: 'auto',
       anime_whisper_enhance_dialogue: true,
+      anime_whisper_dtype: 'auto',
       qwen_temperature: 0,
+      qwen_dtype: 'auto',
       qwen_max_inference_batch_size: 32,
       qwen_max_new_tokens: 256,
     },
