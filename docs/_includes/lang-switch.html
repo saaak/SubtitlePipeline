@@ -1,0 +1,7 @@
+<div class="lang-switch">
+  {% if page.lang == "en" %}
+  <strong>English</strong> | <a href="{{ page.alt_path }}">??</a>
+  {% elsif page.lang == "zh" %}
+  <a href="{{ page.alt_path }}">English</a> | <strong>??</strong>
+  {% endif %}
+</div>
