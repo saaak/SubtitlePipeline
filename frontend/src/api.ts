@@ -56,6 +56,7 @@ export type TranslationContentType =
   | 'variety_show'
   | 'news'
 
+export type LLMType = 'openai-chat' | 'openai-responses' | 'openai-compatible' | 'anthropic' | 'lmstudio' | 'ollama'
 export type ASRProvider = 'whisperx' | 'faster-whisper' | 'anime-whisper' | 'qwen'
 export type AlignProvider = 'auto' | 'whisperx' | 'qwen-forced' | 'none'
 export type ModelProvider = ASRProvider | 'qwen-forced'
@@ -113,6 +114,7 @@ export type AppConfig = {
     target_languages: string[]
     max_retries: number
     timeout_seconds: number
+    llm_type: LLMType
     api_base_url: string
     api_key: string
     model: string
@@ -178,6 +180,7 @@ export type ModelListResponse = {
 
 export type TranslationTestPayload = {
   enabled: boolean
+  llm_type: LLMType
   api_base_url: string
   api_key: string
   model: string
@@ -211,6 +214,15 @@ export const translationContentTypeOptions: Array<{ value: TranslationContentTyp
   { value: 'tech_talk', label: '技术讲座' },
   { value: 'variety_show', label: '综艺/脱口秀' },
   { value: 'news', label: '新闻' },
+]
+
+export const llmTypeOptions: Array<{ value: LLMType; label: string; defaultBaseUrl: string }> = [
+  { value: 'openai-chat', label: 'OpenAI Chat Completions', defaultBaseUrl: 'https://api.openai.com' },
+  { value: 'openai-responses', label: 'OpenAI Responses', defaultBaseUrl: 'https://api.openai.com' },
+  { value: 'openai-compatible', label: 'OpenAI Compatible', defaultBaseUrl: 'https://api.openai.com' },
+  { value: 'anthropic', label: 'Anthropic Messages', defaultBaseUrl: 'https://api.anthropic.com' },
+  { value: 'lmstudio', label: 'LM Studio', defaultBaseUrl: 'http://localhost:1234' },
+  { value: 'ollama', label: 'Ollama', defaultBaseUrl: 'http://localhost:11434' },
 ]
 
 export const bilingualModeOptions: Array<{ value: BilingualMode; label: string }> = [
@@ -307,6 +319,7 @@ export const defaultAppConfig: AppConfig = {
     target_languages: ['zh'],
     max_retries: 2,
     timeout_seconds: 30,
+    llm_type: 'openai-chat',
     api_base_url: 'https://api.openai.com',
     api_key: '',
     model: 'gpt-4o-mini',

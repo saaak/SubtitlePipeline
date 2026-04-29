@@ -403,9 +403,10 @@ class Database:
         translation = config["translation"]
         translation_ready = True
         if translation["enabled"]:
+            required_keys = ("api_base_url", "model") if translation.get("llm_type") in {"lmstudio", "ollama"} else ("api_base_url", "api_key", "model")
             translation_ready = all(
                 str(translation[key]).strip()
-                for key in ("api_base_url", "api_key", "model")
+                for key in required_keys
             )
         return {
             "setup_complete": self.is_setup_complete(),
