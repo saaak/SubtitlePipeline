@@ -14,6 +14,7 @@ from app.pipeline import PipelineError, debug_translation_request
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--llm-type", default="openai-compatible")
     parser.add_argument("--api-base-url", required=True)
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--model", required=True)
@@ -51,6 +52,7 @@ def main() -> int:
     try:
         texts = load_texts(args)
         result = debug_translation_request(
+            llm_type=args.llm_type,
             api_base_url=args.api_base_url,
             api_key=args.api_key,
             model=args.model,

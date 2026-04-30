@@ -55,6 +55,7 @@ class ScanResponse(BaseModel):
 
 class TranslationTestRequest(BaseModel):
     enabled: bool = True
+    llm_type: str = "openai-compatible"
     api_base_url: str = ""
     api_key: str = ""
     model: str = ""
@@ -313,12 +314,13 @@ def create_app() -> FastAPI:
                 {
                     "translation": {
                         "enabled": True,
+                        "llm_type": request.llm_type,
                         "api_base_url": request.api_base_url,
                         "api_key": request.api_key,
                         "model": request.model,
                         "timeout_seconds": request.timeout_seconds,
-                    "content_type": request.content_type,
-                    "custom_prompt": request.custom_prompt,
+                        "content_type": request.content_type,
+                        "custom_prompt": request.custom_prompt,
                     }
                 }
             )

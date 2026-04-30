@@ -11,6 +11,7 @@ import {
   getConfig,
   getModels,
   getSystemStatus,
+  llmTypeOptions,
   ModelListResponse,
   setSetupComplete,
   sourceLanguageOptions,
@@ -97,6 +98,18 @@ export function SetupWizard({
     }))
   }
 
+  const setLLMType = (value: AppConfig['translation']['llm_type']) => {
+    const option = llmTypeOptions.find((item) => item.value === value)
+    setConfig((current) => ({
+      ...current,
+      translation: {
+        ...current.translation,
+        llm_type: value,
+        api_base_url: option?.defaultBaseUrl || current.translation.api_base_url,
+      },
+    }))
+  }
+
   const selectedModelItem = useMemo(
     () => models.items.find((item) => item.name === selectedModel),
     [models.items, selectedModel],
@@ -133,6 +146,7 @@ export function SetupWizard({
     try {
       const result = await testTranslation({
         enabled: config.translation.enabled,
+        llm_type: config.translation.llm_type,
         api_base_url: config.translation.api_base_url,
         api_key: config.translation.api_key,
         model: config.translation.model,
@@ -397,6 +411,20 @@ export function SetupWizard({
             </label>
           </div>
           <div className={`field-grid ${config.translation.enabled ? '' : 'disabled-section'}`}>
+            <label>
+              <span>LLM 类型</span>
+              <select
+                disabled={!config.translation.enabled}
+                value={config.translation.llm_type}
+                onChange={(event) => setLLMType(event.target.value as AppConfig['translation']['llm_type'])}
+              >
+                {llmTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label>
               <span>API Base URL</span>
               <input

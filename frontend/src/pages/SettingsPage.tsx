@@ -9,6 +9,7 @@ import {
   defaultAppConfig,
   getConfig,
   getModels,
+  llmTypeOptions,
   ModelListResponse,
   retryModeOptions,
   sourceLanguageOptions,
@@ -282,6 +283,18 @@ export function SettingsPage() {
     }))
   }
 
+  const setLLMType = (value: AppConfig['translation']['llm_type']) => {
+    const option = llmTypeOptions.find((item) => item.value === value)
+    setConfig((current) => ({
+      ...current,
+      translation: {
+        ...current.translation,
+        llm_type: value,
+        api_base_url: option?.defaultBaseUrl || current.translation.api_base_url,
+      },
+    }))
+  }
+
   const addFileExtension = (value: string) => {
     const list = [...config.file.allowed_extensions]
     if (!list.includes(value)) {
@@ -452,6 +465,7 @@ export function SettingsPage() {
     try {
       const result = await testTranslation({
         enabled: config.translation.enabled,
+        llm_type: config.translation.llm_type,
         api_base_url: config.translation.api_base_url,
         api_key: config.translation.api_key,
         model: config.translation.model,
@@ -766,6 +780,7 @@ export function SettingsPage() {
           tone={translationStatus.tone}
           pills={[
             config.translation.enabled ? '已启用' : '已关闭',
+            config.translation.llm_type,
             config.translation.target_languages.join(', ') || '未设置目标语言',
             config.translation.model || '未设置模型',
           ]}
@@ -780,6 +795,16 @@ export function SettingsPage() {
           basicContent={(
             <div className={config.translation.enabled ? '' : 'disabled-section'}>
               <div className="field-grid">
+                <label>
+                  <span>LLM 类型</span>
+                  <select disabled={!config.translation.enabled} value={config.translation.llm_type} onChange={(event) => setLLMType(event.target.value as AppConfig['translation']['llm_type'])}>
+                    {llmTypeOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label>
                   <span>API Base URL</span>
                   <input disabled={!config.translation.enabled} value={config.translation.api_base_url} onChange={(event) => setField('translation', 'api_base_url', event.target.value)} />

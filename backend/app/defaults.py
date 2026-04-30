@@ -69,6 +69,7 @@ DEFAULT_CONFIG = {
         "target_languages": ["zh"],
         "max_retries": 2,
         "timeout_seconds": 30,
+        "llm_type": "openai-chat",
         "api_base_url": "https://api.openai.com",
         "api_key": "",
         "model": "gpt-4o-mini",

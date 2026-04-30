@@ -13,8 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import openai
-from openai import OpenAI
 from app.segment_cleaner import clean_segments
 
 logger = logging.getLogger(__name__)
@@ -80,6 +78,7 @@ from .asr import (
 )
 from .asr.aligners import QwenForcedAligner, WhisperXAligner
 from .asr.helpers import get_models_root
+from .llm import LLMError, LLMMessage, LLMRateLimitError, create_llm_client
 from .model_manager import DEFAULT_PROVIDER, infer_provider_from_model_name, normalize_provider_name
 
 STAGE_ALIAS_MAP = {
@@ -393,22 +392,24 @@ class ChunkedTranslator:
 
     def _translate_chunk(self, chunk: TranslationChunk, target_language: str) -> list[str]:
         self.pause_event.wait()
-        if isinstance(self.provider, OpenAICompatibleTranslationProvider):
+        if isinstance(self.provider, LLMTranslationProvider):
             return self.provider.translate_chunk(chunk, target_language, self.content_type, self.custom_prompt)
         return self.provider.translate_batch([line.text for line in chunk.main_segments], target_language)
 
 
-class OpenAICompatibleTranslationProvider(TranslationProvider):
-    def __init__(self, api_base_url: str, api_key: str, model: str, timeout_seconds: int):
+class LLMTranslationProvider(TranslationProvider):
+    def __init__(self, llm_type: str, api_base_url: str, api_key: str, model: str, timeout_seconds: int):
+        self.llm_type = llm_type
         self.api_base_url = api_base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout_seconds = timeout_seconds
-        self.client = OpenAI(
-            api_key=self.api_key or "missing-api-key",
-            base_url=self._resolve_base_url(),
-            timeout=float(self.timeout_seconds),
-            max_retries=0,
+        self.client = create_llm_client(
+            llm_type=self.llm_type,
+            api_base_url=self.api_base_url,
+            api_key=self.api_key,
+            model=self.model,
+            timeout_seconds=self.timeout_seconds,
         )
 
     def translate_batch(self, texts: list[str], target_language: str) -> list[str]:
@@ -431,8 +432,6 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         texts = [line.text for line in chunk.main_segments]
         if not texts:
             return []
-        if not self.api_key:
-            raise PipelineError("translation.api_key 未配置，无法调用真实翻译 provider")
         prompt = self._build_prompt(target_language, content_type, custom_prompt)
 
         # Partial-retry loop: keep valid prefix, only retry the tail
@@ -513,52 +512,20 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
         return final
 
     def _resolve_base_url(self) -> str:
-        if self.api_base_url.endswith("/v1"):
-            return self.api_base_url
-        return f"{self.api_base_url}/v1"
+        return self.client.resolved_base_url()
 
     def _request_translation(self, prompt: str, user_content: str) -> str:
         try:
-            stream = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=8192,
-                stream=True,
-                temperature=0.3,
-                frequency_penalty=1.2,
-                presence_penalty=0.8,
+            return self.client.complete(
+                [
+                    LLMMessage(role="system", content=prompt),
+                    LLMMessage(role="user", content=user_content),
+                ]
             )
-            parts: list[str] = []
-            finish_reason: str | None = None
-            for chunk in stream:
-                choice = chunk.choices[0] if chunk.choices else None
-                if choice is None:
-                    continue
-                if choice.delta and choice.delta.content:
-                    parts.append(choice.delta.content)
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-        except openai.AuthenticationError as exc:
-            raise PipelineError("翻译服务鉴权失败，请检查 API Key") from exc
-        except openai.RateLimitError as exc:
-            raise TranslationRateLimitError("翻译服务触发限流，请稍后重试") from exc
-        except openai.BadRequestError as exc:
-            raise PipelineError(f"翻译请求参数无效: {exc}") from exc
-        except openai.APIConnectionError as exc:
-            raise PipelineError("翻译服务连接失败，请检查 API 地址、网络或服务状态") from exc
-        except openai.APIStatusError as exc:
-            raise PipelineError(f"翻译服务返回异常状态 {exc.status_code}") from exc
-        except openai.APIError as exc:
-            raise PipelineError(f"翻译服务调用失败: {exc}") from exc
-        content = "".join(parts)
-        if not content:
-            raise PipelineError("真实翻译 provider 未返回文本内容")
-        if finish_reason == "length":
-            logger.warning("翻译输出被截断 (finish_reason=length)，可能影响解析")
-        return content
+        except LLMRateLimitError as exc:
+            raise TranslationRateLimitError(str(exc)) from exc
+        except LLMError as exc:
+            raise PipelineError(str(exc)) from exc
 
     def _build_prompt(self, target_language: str, content_type: str = "general", custom_prompt: str = "") -> str:
         style_prompt = custom_prompt.strip() or TRANSLATION_PRESETS.get(content_type, TRANSLATION_PRESETS["general"])
@@ -596,6 +563,7 @@ class OpenAICompatibleTranslationProvider(TranslationProvider):
 
 
 def debug_translation_request(
+    llm_type: str,
     api_base_url: str,
     api_key: str,
     model: str,
@@ -605,7 +573,8 @@ def debug_translation_request(
     content_type: str = "general",
     custom_prompt: str = "",
 ) -> dict[str, Any]:
-    provider = OpenAICompatibleTranslationProvider(
+    provider = LLMTranslationProvider(
+        llm_type=llm_type,
         api_base_url=api_base_url,
         api_key=api_key,
         model=model,
@@ -622,6 +591,7 @@ def debug_translation_request(
     content = provider._request_translation(prompt, build_chunk_user_message(chunk))
     parsed = parse_chunk_output(content, [line.index for line in chunk.main_segments], texts, provider._parse_json_array_content)
     return {
+        "llm_type": llm_type,
         "base_url": provider._resolve_base_url(),
         "model": model,
         "target_language": target_language,
@@ -863,7 +833,8 @@ def load_processed_segments(context: TaskContext) -> list[dict[str, Any]]:
 
 def get_translation_provider(config_snapshot: dict[str, Any]) -> TranslationProvider:
     translation = config_snapshot["translation"]
-    return OpenAICompatibleTranslationProvider(
+    return LLMTranslationProvider(
+        llm_type=str(translation.get("llm_type", "openai-compatible")).strip(),
         api_base_url=str(translation["api_base_url"]).strip(),
         api_key=str(translation["api_key"]).strip(),
         model=str(translation["model"]).strip(),

@@ -27,6 +27,7 @@ from app.asr import (
 )
 from app.asr.aligners.qwen_forced_aligner import QwenForcedAligner
 from app.asr.providers.qwen import QwenASRProvider
+from app.llm import LLMMessage, create_llm_client
 from app.main import create_app
 from app.model_manager import DownloadState, ModelManager, infer_provider_from_model_name, resolve_model_name
 from app.pipeline import (
@@ -240,7 +241,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIn("huggingface.co/Systran/faster-whisper-tiny", item["manual_download_url"])
         self.assertIn("/models/whisperx-tiny", item["error"])
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_api_endpoints_cover_system_status_translation_and_models(self, mock_openai: MagicMock) -> None:
         self._create_installed_model("whisperx-small")
         mock_client = MagicMock()
@@ -490,7 +491,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         assert updated is not None
         self.assertEqual(updated["stage"], "translate")
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_worker_failure_keeps_failed_stage_and_logs_newest_first(self, mock_openai: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = RuntimeError("translation down")
@@ -633,7 +634,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(next_scan.queued, 1)
         self.assertEqual(len(self.database.list_tasks(page=1, page_size=10).items), 2)
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_failed_translation_requeues_then_fails(self, mock_openai: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = RuntimeError("translation down")
@@ -1088,12 +1089,13 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(load_calls[0]["device_map"], "cuda:0")
         self.assertEqual(load_calls[0]["dtype"], "torch.float32")
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_build_prompt_supports_presets_and_custom_prompt(self, mock_openai: MagicMock) -> None:
         mock_openai.return_value = MagicMock()
-        from app.pipeline import OpenAICompatibleTranslationProvider
+        from app.pipeline import LLMTranslationProvider
 
-        provider = OpenAICompatibleTranslationProvider(
+        provider = LLMTranslationProvider(
+            llm_type="openai-compatible",
             api_base_url="https://api.openai.com",
             api_key="test-key",
             model="gpt-4o-mini",
@@ -1107,7 +1109,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertIn("custom style", custom_prompt)
         self.assertNotIn(TRANSLATION_PRESETS["movie"], custom_prompt)
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_translate_segments_chunked_flow(self, mock_openai: MagicMock) -> None:
         def fake_create(*args, **kwargs):
             user_content = kwargs["messages"][1]["content"]
@@ -1159,7 +1161,7 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(progress_events[-1], (4, 4))
         self.assertEqual(mock_client.chat.completions.create.call_count, 4)
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_openai_compatible_translation_provider(self, mock_openai: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = self._stream_chunks('["你好", "世界"]')
@@ -1190,13 +1192,14 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
         self.assertEqual(translations["zh-CN"], ["你好", "世界"])
         self.assertEqual(mock_client.chat.completions.create.call_args.kwargs["model"], "gpt-4o-mini")
 
-    @patch("app.pipeline.OpenAI")
+    @patch("app.llm.providers.OpenAI")
     def test_translation_debug_and_fenced_json_response(self, mock_openai: MagicMock) -> None:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = self._stream_chunks('```json\n["你好，世界。", "第二行。"]\n```')
         mock_openai.return_value = mock_client
 
         result = debug_translation_request(
+            llm_type="openai-compatible",
             api_base_url="http://example.com:8317",
             api_key="test-key",
             model="deepseek-chat",
@@ -1207,6 +1210,77 @@ class SubtitlePipelineMvpTests(unittest.TestCase):
 
         self.assertEqual(result["parsed"], ["你好，世界。", "第二行。"])
         self.assertEqual(result["base_url"], "http://example.com:8317/v1")
+
+    @patch("app.llm.providers.OpenAI")
+    def test_lmstudio_uses_openai_protocol_without_api_key(self, mock_openai: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = self._stream_chunks("ok")
+        mock_openai.return_value = mock_client
+
+        client = create_llm_client(
+            llm_type="lmstudio",
+            api_base_url="",
+            api_key="",
+            model="local-model",
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(client.resolved_base_url(), "http://localhost:1234/v1")
+        self.assertEqual(client.complete([LLMMessage(role="user", content="hello")]), "ok")
+        self.assertEqual(mock_openai.call_args.kwargs["base_url"], "http://localhost:1234/v1")
+        self.assertEqual(mock_client.chat.completions.create.call_args.kwargs["model"], "local-model")
+
+    @patch("app.llm.providers.OpenAI")
+    def test_openai_responses_uses_responses_api(self, mock_openai: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = types.SimpleNamespace(output_text="ok")
+        mock_openai.return_value = mock_client
+
+        client = create_llm_client(
+            llm_type="openai-responses",
+            api_base_url="https://api.openai.com",
+            api_key="test-key",
+            model="gpt-5.2",
+            timeout_seconds=30,
+        )
+
+        result = client.complete(
+            [
+                LLMMessage(role="system", content="system prompt"),
+                LLMMessage(role="user", content="user content"),
+            ]
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(mock_client.responses.create.call_args.kwargs["model"], "gpt-5.2")
+        self.assertEqual(mock_client.responses.create.call_args.kwargs["instructions"], "system prompt")
+        self.assertEqual(mock_client.responses.create.call_args.kwargs["input"], "user content")
+
+    @patch("app.llm.providers.OpenAI")
+    def test_openai_responses_parses_output_array_fallback(self, mock_openai: MagicMock) -> None:
+        mock_client = MagicMock()
+        mock_client.responses.create.return_value = types.SimpleNamespace(
+            output_text="",
+            output=[
+                types.SimpleNamespace(
+                    content=[
+                        types.SimpleNamespace(text="0|你好世界。\n"),
+                        types.SimpleNamespace(text="1|第二行。"),
+                    ]
+                )
+            ],
+        )
+        mock_openai.return_value = mock_client
+
+        client = create_llm_client(
+            llm_type="openai-responses",
+            api_base_url="https://api.openai.com",
+            api_key="test-key",
+            model="gpt-5.2",
+            timeout_seconds=30,
+        )
+
+        self.assertEqual(client.complete([LLMMessage(role="user", content="hello")]), "0|你好世界。\n1|第二行。")
 
 
 if __name__ == "__main__":
